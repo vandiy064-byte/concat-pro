@@ -278,8 +278,6 @@ component OutputSection inherits DialogSection {
     callback codec-changed(index: int);
     callback ten-bit-changed(on: bool);
     callback hdr-changed(on: bool);
-    callback export-subtitles-changed(on: bool);
-    callback export-srt-only();
 
     title: I18n.t("export.output");
 
@@ -390,7 +388,61 @@ component OutputSection inherits DialogSection {
         }
     }
 
-    if root.data.has-subtitles: DialogRow {
+}
+
+component SubtitlesSection inherits DialogSection {
+    in property <ExportData> data;
+
+    callback export-subtitles-changed(on: bool);
+    callback export-srt-only();
+
+    title: I18n.t("export.subtitlesSection");
+
+    // Status banner: always visible so user always knows subtitle status!
+    Rectangle {
+        border-radius: Theme.r;
+        background: root.data.has-subtitles ? Theme.field : Theme.raised;
+        border-width: 1px;
+        border-color: root.data.has-subtitles ? Theme.accent : Theme.line;
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 6px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        glyph: root.data.has-subtitles ? Glyph.check : Glyph.sparkle;
+                        size: 14px;
+                        tint: root.data.has-subtitles ? Theme.accent : Theme.fg-muted;
+                    }
+                }
+
+                Text {
+                    text: root.data.has-subtitles
+                        ? I18n.t("export.subtitlesDetected")
+                        : I18n.t("export.noSubtitlesOnTimeline");
+                    color: root.data.has-subtitles ? Theme.fg : Theme.fg-muted;
+                    font-size: Theme.fs;
+                    font-weight: root.data.has-subtitles ? Theme.weight-title : Theme.weight-normal;
+                    vertical-alignment: center;
+                }
+            }
+
+            if !root.data.has-subtitles: Text {
+                text: I18n.t("export.noSubtitlesTimelineHint");
+                color: Theme.fg-dim;
+                font-size: Theme.fs-sm;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    DialogRow {
         label: I18n.t("export.exportSubtitlesSrt");
         HorizontalLayout {
             alignment: end;
@@ -398,13 +450,20 @@ component OutputSection inherits DialogSection {
                 alignment: center;
                 Switch {
                     checked: root.data.export-subtitles;
+                    enabled: root.data.has-subtitles;
                     toggled(on) => { root.export-subtitles-changed(on); }
                 }
             }
         }
     }
 
-    if root.data.has-subtitles: DialogRow {
+    Text {
+        text: I18n.t("export.companionSrtHint");
+        color: Theme.fg-dim;
+        font-size: Theme.fs-sm;
+    }
+
+    DialogRow {
         label: I18n.t("export.exportSrtOnly");
         HorizontalLayout {
             alignment: end;
@@ -412,6 +471,7 @@ component OutputSection inherits DialogSection {
                 label: I18n.t("export.exportSrtNow");
                 glyph: Glyph.export;
                 ghost: true;
+                enabled: root.data.has-subtitles;
                 clicked => { root.export-srt-only(); }
             }
         }
@@ -754,6 +814,9 @@ export component ExportDialog inherits Rectangle {
                             codec-changed(index) => { root.codec-changed(index); }
                             ten-bit-changed(on) => { root.ten-bit-changed(on); }
                             hdr-changed(on) => { root.hdr-changed(on); }
+                        }
+                        if !root.running: SubtitlesSection {
+                            data: root.data;
                             export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
                             export-srt-only => { root.export-srt-only(); }
                         }
@@ -795,6 +858,9 @@ export component ExportDialog inherits Rectangle {
                                 codec-changed(index) => { root.codec-changed(index); }
                                 ten-bit-changed(on) => { root.ten-bit-changed(on); }
                                 hdr-changed(on) => { root.hdr-changed(on); }
+                            }
+                            SubtitlesSection {
+                                data: root.data;
                                 export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
                                 export-srt-only => { root.export-srt-only(); }
                             }
@@ -802,7 +868,7 @@ export component ExportDialog inherits Rectangle {
                     }
 
                     // Three columns: the picture and what it is; how it is
-                    // written; where it goes.
+                    // written; where it goes and subtitles.
                     if !root.running && root.columns == 3: HorizontalLayout {
                         spacing: 12px;
 
@@ -831,8 +897,6 @@ export component ExportDialog inherits Rectangle {
                                 codec-changed(index) => { root.codec-changed(index); }
                                 ten-bit-changed(on) => { root.ten-bit-changed(on); }
                                 hdr-changed(on) => { root.hdr-changed(on); }
-                                export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
-                                export-srt-only => { root.export-srt-only(); }
                             }
                         }
 
@@ -845,6 +909,11 @@ export component ExportDialog inherits Rectangle {
                                 phone: root.phone;
                                 name-edited(name) => { root.name-edited(name); }
                                 browse => { root.browse(); }
+                            }
+                            SubtitlesSection {
+                                data: root.data;
+                                export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
+                                export-srt-only => { root.export-srt-only(); }
                             }
                         }
                     }
