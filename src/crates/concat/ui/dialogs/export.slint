@@ -416,7 +416,7 @@ component SubtitlesSection inherits DialogSection {
                 VerticalLayout {
                     alignment: center;
                     Icon {
-                        glyph: root.data.has-subtitles ? Glyph.check : Glyph.sparkle;
+                        glyph: root.data.has-subtitles ? Glyph.check : Glyph.info;
                         size: 14px;
                         tint: root.data.has-subtitles ? Theme.accent : Theme.fg-muted;
                     }
@@ -428,7 +428,7 @@ component SubtitlesSection inherits DialogSection {
                         : I18n.t("export.noSubtitlesOnTimeline");
                     color: root.data.has-subtitles ? Theme.fg : Theme.fg-muted;
                     font-size: Theme.fs;
-                    font-weight: root.data.has-subtitles ? Theme.weight-title : Theme.weight-normal;
+                    font-weight: root.data.has-subtitles ? Theme.weight-title : Theme.weight-body;
                     vertical-alignment: center;
                 }
             }
