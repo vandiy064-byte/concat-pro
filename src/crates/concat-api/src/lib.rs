@@ -1143,27 +1143,8 @@ impl Api {
                 (m, v)
             }
             (None, None) => {
-                let is_vietnamese = text.chars().any(|c| {
-                    matches!(
-                        c,
-                        'à'..='ỹ'
-                            | 'À'..='Ỹ'
-                            | 'đ'
-                            | 'Đ'
-                            | 'ă'
-                            | 'Ă'
-                            | 'â'
-                            | 'Â'
-                            | 'ê'
-                            | 'Ê'
-                            | 'ô'
-                            | 'Ô'
-                            | 'ơ'
-                            | 'Ơ'
-                            | 'ư'
-                            | 'Ư'
-                    )
-                });
+                const VIETNAMESE_CHARS: &str = "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ";
+                let is_vietnamese = text.chars().any(|c| VIETNAMESE_CHARS.contains(c));
                 if is_vietnamese {
                     (
                         "vits-piper-vi_VN-vivos-x_low".to_owned(),
