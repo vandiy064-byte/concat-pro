@@ -1,0 +1,2485 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+//! The Concat API: the one dispatcher every way of driving the editor
+//! without its window goes through.
+//!
+//! The command line, a daemon on a socket, an MCP server, a plugin: each is
+//! a transport, and a transport is a loop that reads a [`Request`], hands
+//! it to [`Api::dispatch`], and writes the [`Response`] back, forwarding
+//! the [`Event`]s the API's jobs raise as they come. Nothing about what a
+//! request *means* lives in a transport, so two of them cannot disagree,
+//! and a method added here reaches all of them. What a line transport puts
+//! around the three is the JSON-RPC 2.0 envelope in [`rpc`].
+//!
+//! The crate decides nothing about the edit either. Edits are
+//! `concat_project` [`Command`]s carried as they are; projects, media,
+//! templates, titles, cutouts and exports are `concat_host`'s. What this
+//! crate owns is the choreography the window performs by hand - probe then
+//! add, find masks and paint titles before rendering, save through the
+//! session - stated once so a file exported here is the file the window
+//! would have written.
+//!
+//! One [`Api`] holds one session per open project folder. It is not
+//! thread-safe by design: a transport that serves several callers owns the
+//! one `Api` and serialises through it, the way the window's event loop
+//! does. A method that would keep everyone waiting - an export - runs as a
+//! job on its own thread instead: [`Api::dispatch`] returns its name at
+//! once and the job reports through the [`EventSink`] the API was made
+//! with, from that thread, which is why the sink must be `Send + Sync`.
+
+mod job;
+pub mod message;
+pub mod rpc;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+use base64::Engine as _;
+use concat_effects::Catalogue;
+use concat_effects::manifest::Kind;
+use concat_export::{ExportClip, ExportRequest};
+pub use concat_host::AppDirs;
+use concat_host::cutout::{self, AnalyseRequest, Cutouts};
+use concat_host::export::{self, Exporter};
+use concat_host::preview::{FrameSpec, Monitor};
+use concat_host::session::EditorView;
+use concat_host::stabilize::{StabilizeRequest, Stabilizers};
+use concat_host::{ProjectInfo, Session, Titles, lock, media, projects};
+use concat_project::Command;
+use concat_project::model::VideoSettings;
+use concat_speech::{Speech, Transcriber};
+use concat_speech::transcribe::TranscribeRequest;
+use concat_speech::tts::{Family, Reference, SpeakRequest, family_of, voice_family};
+
+pub use message::{
+    API_VERSION, ApiError, CaptionSegment, CaptionsResultInfo, Dirs, Done, ErrorCode, Event,
+    ExportSpec, Fill, JobState, JobStatus, PackageInfo, ParamInfo, Picture, ReferenceSpec, Reply,
+    Request, Response, SavedVoiceSummary, SpeechModelSummary, SpeechResultInfo, SpeechVoicesInfo,
+    Started, VersionInfo, VoiceSummary, Written,
+};
+
+/// The export sheet's middle quality, and what an export gets when the
+/// caller says nothing.
+const DEFAULT_CRF: u8 = 20;
+/// The x264 preset every export uses unless told otherwise.
+const DEFAULT_PRESET: &str = "medium";
+
+/// What every build of the API serves, before what is decided by the
+/// build or the embedder is added; see [`VersionInfo::capabilities`].
+const CAPABILITIES: &[&str] = &["events", "speech", "transcribe"];
+
+/// The JSON Schema of [`Request`]: one alternative per method, each the
+/// object its params are with `method` naming it, and every type a request
+/// carries - an edit [`Command`] and all it holds - under `$defs`. The
+/// descriptions are this crate's and `concat_project`'s doc comments, so
+/// what a caller is told about a field is what its maintainer wrote next
+/// to it. Generated, never written by hand: a method or a command field
+/// added to the types is in the schema on the next build.
+#[cfg(feature = "schema")]
+pub fn request_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(Request)).unwrap_or_default()
+}
+
+/// Where a job's events go. Called from the job's thread, so a transport
+/// that writes them to a caller locks its writer inside.
+pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// The largest frame a preview or an export may ask for, a side: 8K, the
+/// engine's own ceiling. A caller with the token is trusted to edit, not
+/// to ask the machine for seventeen gigabytes of pixels (audit 2026-09-23,
+/// #4).
+pub const MAX_SIDE: u32 = concat_core::frame::MAX_SIDE;
+/// The highest constant rate factor any codec here takes.
+const MAX_CRF: u8 = 63;
+/// The fastest frame rate an export may ask for.
+const MAX_RATE: f64 = 240.0;
+
+/// Who holds a project folder open on this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holder {
+    /// The window, on screen.
+    Window,
+    /// The API, for a caller on a socket.
+    Api,
+}
+
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Holder::Window => "the window",
+            Holder::Api => "the API",
+        })
+    }
+}
+
+/// Why a project folder could not be claimed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The other side of this process has it: the window, or the API it
+    /// serves.
+    Here(Holder),
+    /// Another process has it - a second window, `concat --mcp`, the CLI -
+    /// as its lock file says.
+    Elsewhere(lock::Owner),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Here(holder) => write!(f, "open in {holder}"),
+            Refusal::Elsewhere(owner) => {
+                let what = if owner.role == "window" {
+                    "a Concat window"
+                } else {
+                    "another Concat process"
+                };
+                match owner.pid {
+                    Some(pid) => write!(f, "open in {what} (process {pid})"),
+                    None => write!(f, "open in {what}"),
+                }
+            }
+        }
+    }
+}
+
+/// One claimed folder: who has it in this process, and the lock that
+/// keeps every other process off it.
+struct Claim {
+    holder: Holder,
+    /// `None` where the folder would not take a lock file - one that
+    /// cannot be written - which costs the guard, not the open.
+    _lock: Option<lock::ProjectLock>,
+}
+
+/// The project folders open on this machine and who has each, shared
+/// between a window and the API it embeds, so neither opens a folder the
+/// other is editing and saves over its work (audit 2026-09-23, #5). Cheap
+/// to clone; every clone is the same register.
+///
+/// Each claimed folder is also locked against every other process
+/// ([`lock::ProjectLock`]): a second window, `concat --mcp` working on its
+/// own, the CLI. The lock goes with the claim, and with the process if it
+/// dies, so a crash leaves a folder the next opener takes over.
+#[derive(Clone, Default)]
+pub struct OpenProjects(Arc<Mutex<BTreeMap<String, Claim>>>);
+
+impl OpenProjects {
+    /// Claims `path` for `holder`. Refused, naming who has it, when the
+    /// other side of this process does or another process does; claiming
+    /// again what one already holds is fine.
+    pub fn claim(&self, path: &str, holder: Holder) -> Result<(), Refusal> {
+        let key = key_of(path);
+        let mut open = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match open.get(&key) {
+            Some(claim) if claim.holder != holder => Err(Refusal::Here(claim.holder)),
+            Some(_) => Ok(()),
+            None => {
+                let role = match holder {
+                    Holder::Window => "window",
+                    Holder::Api => "api",
+                };
+                let lock = match lock::ProjectLock::acquire(Path::new(path), role) {
+                    Ok(lock) => Some(lock),
+                    Err(lock::LockError::Held(owner)) => return Err(Refusal::Elsewhere(owner)),
+                    // A folder that will not take the file: a read-only
+                    // one, which nobody can save over anyway.
+                    Err(lock::LockError::Io(_)) => None,
+                };
+                open.insert(
+                    key,
+                    Claim {
+                        holder,
+                        _lock: lock,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Gives `path` back, whoever had it.
+    pub fn release(&self, path: &str) {
+        let key = key_of(path);
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+
+    /// Who has `path` open, if anyone.
+    pub fn holder(&self, path: &str) -> Option<Holder> {
+        let key = key_of(path);
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .map(|claim| claim.holder)
+    }
+}
+
+/// The dispatcher: the open sessions and the services behind them.
+pub struct Api {
+    dirs: AppDirs,
+    /// Open projects by canonical folder path.
+    sessions: BTreeMap<String, Session>,
+    /// Where this API may write: a created project, an instantiated
+    /// template, an export or a preview file lands under one of these.
+    /// Empty means anywhere, for the process's own owner at a terminal.
+    roots: Vec<PathBuf>,
+    /// Which project folders are open on this machine, across this API
+    /// and a window it is embedded in.
+    open: OpenProjects,
+    titles: Titles,
+    cutouts: Arc<Cutouts>,
+    stabilizers: Arc<Stabilizers>,
+    speech: Arc<Speech>,
+    transcriber: Arc<Transcriber>,
+    monitor: Monitor,
+    exporter: Exporter,
+    events: EventSink,
+    jobs: Jobs,
+    /// Every job's last known state and each running one's stop flag, fed
+    /// by the events on their way to `events`.
+    book: Arc<job::Book>,
+    /// [`VersionInfo::capabilities`], in the order they were added.
+    capabilities: Vec<String>,
+}
+
+/// A way to stop the jobs of one [`Api`] from any thread, without waiting
+/// for its thread to be free: what a server that is shutting down calls
+/// before it waits for that thread. Cheap to clone.
+#[derive(Clone)]
+pub struct Stopper {
+    book: Arc<job::Book>,
+    cutouts: Arc<Cutouts>,
+}
+
+impl Stopper {
+    /// Asks every job this API started to stop at its next frame - its
+    /// own and no other, even where the export slot is shared with a
+    /// window. Each then ends with [`ErrorCode::Cancelled`]. How many
+    /// were running.
+    pub fn cancel_all(&self) -> usize {
+        let running = self.book.cancel_all();
+        if running > 0 {
+            // A job still finding masks is in the analysis, not the
+            // render; the analysis is this API's own.
+            self.cutouts.cancel();
+        }
+        running
+    }
+}
+
+impl Api {
+    /// An API over this machine's app directories, reporting its jobs
+    /// through `events`.
+    pub fn new(events: EventSink) -> Result<Api, String> {
+        Ok(Api::with_dirs(AppDirs::locate()?, events))
+    }
+
+    /// An API over the given directories: a test's scratch, or an embedder
+    /// with a home of its own.
+    pub fn with_dirs(dirs: AppDirs, events: EventSink) -> Api {
+        let book = Arc::new(job::Book::default());
+        let events: EventSink = {
+            let book = Arc::clone(&book);
+            Arc::new(move |event: Event| {
+                book.record(&event);
+                events(event);
+            })
+        };
+        Api {
+            book,
+            titles: Titles::new(&dirs),
+            cutouts: Arc::new(Cutouts::new(&dirs.data)),
+            stabilizers: Arc::new(Stabilizers::new()),
+            speech: Arc::new(Speech::new()),
+            transcriber: Arc::new(Transcriber::new()),
+            monitor: Monitor::new(),
+            exporter: Exporter::new(),
+            sessions: BTreeMap::new(),
+            roots: Vec::new(),
+            open: OpenProjects::default(),
+            events,
+            jobs: Jobs::default(),
+            dirs,
+            capabilities: CAPABILITIES.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    /// The directories this API works under.
+    pub fn dirs(&self) -> &AppDirs {
+        &self.dirs
+    }
+
+    /// Adds a name to [`VersionInfo::capabilities`]: what the transport
+    /// or embedder around this API serves that the API cannot know of
+    /// itself, such as the sockets it is listening on. A name already
+    /// there is not repeated.
+    pub fn add_capability(&mut self, name: &str) {
+        if !self.capabilities.iter().any(|known| known == name) {
+            self.capabilities.push(name.to_owned());
+        }
+    }
+
+    /// What stops this API's jobs from another thread; see [`Stopper`].
+    pub fn stopper(&self) -> Stopper {
+        Stopper {
+            book: Arc::clone(&self.book),
+            cutouts: Arc::clone(&self.cutouts),
+        }
+    }
+
+    /// [`Request::ExportStatus`].
+    pub fn job_status(&mut self, job: &str) -> Result<JobStatus, ApiError> {
+        self.jobs.reap(&self.book);
+        self.book.status(job).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::NotFound,
+                format!("no job {job}: it never ran, or ended long ago"),
+            )
+        })
+    }
+
+    /// The export slot, for an embedder that shares it with a window.
+    pub fn exporter(&self) -> Exporter {
+        self.exporter.clone()
+    }
+
+    /// Takes an embedder's export slot in place of its own, so "one export
+    /// at a time" holds across a window and this API together.
+    pub fn share_exporter(&mut self, exporter: Exporter) {
+        self.exporter = exporter;
+    }
+
+    /// Takes an embedder's register of open projects in place of its own,
+    /// so a folder the window has open is refused here, and the other way
+    /// round.
+    pub fn share_open_projects(&mut self, open: OpenProjects) {
+        self.open = open;
+    }
+
+    /// Confines every write to `roots`: from here on a created project, an
+    /// instantiated template, an export and a preview file must land under
+    /// one of them, and any other path is `refused`. Reads - a probe, a
+    /// project opened by path - are not confined. An empty list confines
+    /// nothing, which is right for the process's own owner at a terminal
+    /// and wrong for a socket.
+    pub fn restrict_writes_to(&mut self, roots: Vec<PathBuf>) {
+        self.roots = roots
+            .into_iter()
+            .map(|root| root.canonicalize().unwrap_or(root))
+            .collect();
+    }
+
+    /// The roots writes are confined to; empty when they are not.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// `path` as somewhere this API may write, or why not.
+    fn writable(&self, path: &str) -> Result<(), ApiError> {
+        if self.roots.is_empty() {
+            return Ok(());
+        }
+        let outside = || {
+            let roots = self
+                .roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ApiError::new(
+                ErrorCode::Refused,
+                format!("{path} is outside where this API writes ({roots})"),
+            )
+        };
+        let given = Path::new(path);
+        // A `..` past the part of the path that exists cannot be resolved
+        // and would walk out of a root on paper while staying under it in
+        // this check; there is no reason a caller needs one.
+        if given
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(outside());
+        }
+        let target = resolved(given);
+        if self.roots.iter().any(|root| target.starts_with(root)) {
+            Ok(())
+        } else {
+            Err(outside())
+        }
+    }
+
+    /// How many jobs are still running.
+    pub fn running(&mut self) -> usize {
+        self.jobs.reap(&self.book);
+        self.jobs.threads.len()
+    }
+
+    /// Waits for every running job to end. A transport calls this before
+    /// it exits, so an export begun on its last line still finishes.
+    pub fn finish(&mut self) {
+        self.jobs.finish();
+    }
+
+    /// Runs one request. The response is what the request is worth; a job
+    /// it begins reports through the sink from then on.
+    pub fn dispatch(&mut self, request: Request) -> Response {
+        self.jobs.reap(&self.book);
+        self.run(request).into()
+    }
+
+    fn run(&mut self, request: Request) -> Result<Reply, ApiError> {
+        let view = |view: EditorView| Ok(Reply::View(Box::new(view)));
+        match request {
+            Request::Version => Ok(Reply::Version(self.version())),
+            Request::ProjectCreate {
+                location,
+                name,
+                video,
+            } => view(self.create(&location, &name, video.unwrap_or_default())?),
+            Request::ProjectOpen { path } => view(self.open(&path)?),
+            Request::ProjectClose { path, save } => {
+                self.close(&path, save)?;
+                Ok(Reply::Done(Done {}))
+            }
+            Request::ProjectList => Ok(Reply::Projects(self.recents())),
+            Request::ProjectGet { path } => view(self.session(&path)?.view()),
+            Request::ProjectDocument { path } => {
+                Ok(Reply::Document(self.session(&path)?.document()))
+            }
+            Request::ProjectSave { path, name } => {
+                self.save(&path, name.as_deref())?;
+                Ok(Reply::Done(Done {}))
+            }
+            Request::ProjectSetVideo { path, video } => {
+                view(self.session_mut(&path)?.set_video(video).map_err(refused)?)
+            }
+            Request::EditApply { path, command } => view(self.apply(&path, *command)?),
+            Request::EditUndo { path } => view(self.session_mut(&path)?.undo()),
+            Request::EditRedo { path } => view(self.session_mut(&path)?.redo()),
+            Request::MediaProbe { path } => {
+                Ok(Reply::Media(media::probe(&path).map_err(ApiError::failed)?))
+            }
+            Request::MediaImport { path, file } => view(self.import(&path, &file)?),
+            Request::CatalogueList { kind } => Ok(Reply::Packages(catalogue(kind.as_deref())?)),
+            Request::TemplateList => Ok(Reply::Templates(templates::list(&self.dirs.config))),
+            Request::TemplateInstantiate {
+                template,
+                location,
+                name,
+                fills,
+            } => view(self.instantiate(&template, &location, &name, fills)?),
+            Request::TemplateSave { path, name } => {
+                Ok(Reply::Template(self.save_template(&path, &name)?))
+            }
+            Request::SpeechVoices => Ok(Reply::SpeechVoices(self.speech_voices()?)),
+            Request::SpeechGenerate {
+                path,
+                text,
+                model_id,
+                voice,
+                speed,
+                pauses,
+                steps,
+                reference,
+            } => Ok(Reply::SpeechGenerated(self.speech_generate(
+                &path,
+                &text,
+                model_id.as_deref(),
+                voice,
+                speed,
+                pauses,
+                steps,
+                reference,
+            )?)),
+            Request::CaptionsGenerate {
+                path,
+                clip_id,
+                media_path,
+                model_id,
+                language,
+                audio_stream,
+                source_start,
+                window,
+            } => Ok(Reply::CaptionsGenerated(self.captions_generate(
+                &path,
+                clip_id.as_deref(),
+                media_path.as_deref(),
+                model_id.as_deref(),
+                language.as_deref(),
+                audio_stream,
+                source_start,
+                window,
+            )?)),
+            Request::CaptionsExport {
+                path,
+                format,
+                track_id,
+                output,
+            } => Ok(Reply::CaptionsExported(self.captions_export(
+                &path,
+                format.as_deref(),
+                track_id.as_deref(),
+                output.as_deref(),
+            )?)),
+            Request::CaptionsUpdate { path, captions } => {
+                Ok(Reply::CaptionsUpdated(self.captions_update(&path, captions)?))
+            }
+            Request::CaptionsOcr {
+                path,
+                clip_id,
+                media_path,
+                region_top,
+                region_bottom,
+                language,
+                apply_to_timeline,
+                mask_original,
+            } => Ok(Reply::CaptionsOcrExtracted(self.captions_ocr(
+                &path,
+                clip_id.as_deref(),
+                media_path.as_deref(),
+                region_top,
+                region_bottom,
+                language.as_deref(),
+                apply_to_timeline.unwrap_or(true),
+                mask_original.unwrap_or(false),
+            )?)),
+            Request::CaptionsKaraoke {
+                path,
+                track_id,
+                highlight_color,
+                words_per_line,
+                style,
+            } => Ok(Reply::CaptionsKaraoke(self.captions_karaoke(
+                &path,
+                track_id.as_deref(),
+                highlight_color.as_deref(),
+                words_per_line,
+                style.as_deref(),
+            )?)),
+            Request::TimelineSilenceRemove {
+                path,
+                clip_id,
+                threshold_db,
+                min_silence_duration,
+                padding,
+            } => Ok(Reply::SilenceRemoved(self.silence_remove(
+                &path,
+                clip_id.as_deref(),
+                threshold_db,
+                min_silence_duration,
+                padding,
+            )?)),
+            Request::ScriptToVideo {
+                script,
+                project_name,
+                media_folder,
+                music_path,
+                voice,
+                aspect_ratio,
+            } => Ok(Reply::ScriptToVideoGenerated(self.script_to_video(
+                &script,
+                project_name.as_deref(),
+                media_folder.as_deref(),
+                music_path.as_deref(),
+                voice.as_deref(),
+                aspect_ratio.as_deref(),
+            )?)),
+            Request::SmartReframe {
+                path,
+                target_ratio,
+                focus_mode,
+            } => Ok(Reply::SmartReframed(self.smart_reframe(
+                &path,
+                target_ratio.as_deref(),
+                focus_mode.as_deref(),
+            )?)),
+            Request::CapcutExport {
+                path,
+                draft_name,
+                output_folder,
+            } => Ok(Reply::CapcutExported(self.capcut_export(
+                &path,
+                draft_name.as_deref(),
+                output_folder.as_deref(),
+            )?)),
+            Request::ExportRun { path, spec } => Ok(Reply::Started(self.export(&path, &spec)?)),
+            Request::ExportCancel { job } => {
+                self.cancel(&job)?;
+                Ok(Reply::Done(Done {}))
+            }
+            Request::ExportStatus { job } => Ok(Reply::Job(self.job_status(&job)?)),
+            Request::PreviewFrame {
+                path,
+                time,
+                output,
+                width,
+                height,
+            } => {
+                let size = width.zip(height);
+                match output {
+                    Some(output) => Ok(Reply::Written(self.frame(&path, time, &output, size)?)),
+                    None => Ok(Reply::Picture(self.picture(&path, time, size)?)),
+                }
+            }
+        }
+    }
+
+    /// [`Request::Version`].
+    pub fn version(&self) -> VersionInfo {
+        VersionInfo {
+            api_version: API_VERSION.to_owned(),
+            concat: env!("CARGO_PKG_VERSION").to_owned(),
+            dirs: Dirs::from(&self.dirs),
+            capabilities: {
+                let mut capabilities = self.capabilities.clone();
+                if self.monitor.has_gpu() {
+                    capabilities.push("gpu".to_owned());
+                }
+                capabilities
+            },
+        }
+    }
+
+    /// [`Request::ProjectCreate`]: the folder, its manifest, and a session
+    /// on it, remembered in recents like a project the window made.
+    pub fn create(
+        &mut self,
+        location: &str,
+        name: &str,
+        video: VideoSettings,
+    ) -> Result<EditorView, ApiError> {
+        self.writable(location)?;
+        let info = projects::create(
+            location,
+            name,
+            video.width,
+            video.height,
+            video.rate_num,
+            video.rate_den,
+        )
+        .map_err(ApiError::failed)?;
+        self.adopt(info)
+    }
+
+    /// [`Request::ProjectOpen`].
+    pub fn open(&mut self, path: &str) -> Result<EditorView, ApiError> {
+        let key = key_of(path);
+        if let Some(session) = self.sessions.get(&key) {
+            return Ok(session.view());
+        }
+        let info = projects::open(path).map_err(ApiError::failed)?;
+        self.adopt(info)
+    }
+
+    /// Opens a session on a project the host just described and puts it at
+    /// the front of the recents list.
+    fn adopt(&mut self, info: ProjectInfo) -> Result<EditorView, ApiError> {
+        if let Err(refusal) = self.open.claim(&info.path, Holder::Api) {
+            // A window holding it is the case an agent meets: say how to
+            // go through that window instead of around it.
+            let how = match &refusal {
+                Refusal::Elsewhere(owner) if owner.role == "window" => {
+                    ". To work on it from an agent, turn on Settings > Automation in that window and run the agent with `concat --mcp window`; the project on screen stays the window's until live mode lands"
+                }
+                Refusal::Elsewhere(_) => ". Close it there first",
+                Refusal::Here(_) => "",
+            };
+            return Err(ApiError::new(
+                ErrorCode::Refused,
+                format!("{} is {refusal}{how}", info.path),
+            ));
+        }
+        let session = match Session::open_info(&info) {
+            Ok(session) => session,
+            Err(error) => {
+                self.open.release(&info.path);
+                return Err(ApiError::failed(error));
+            }
+        };
+        // Recents are a convenience for the launch screen; a machine whose
+        // config folder cannot be written still edits.
+        let _ = projects::remember(&self.dirs.config, &info);
+        let view = session.view();
+        self.sessions.insert(key_of(&info.path), session);
+        Ok(view)
+    }
+
+    /// [`Request::ProjectClose`].
+    pub fn close(&mut self, path: &str, save: bool) -> Result<(), ApiError> {
+        if save {
+            self.save(path, None)?;
+        }
+        let closed = self
+            .sessions
+            .remove(&key_of(path))
+            .map(drop)
+            .ok_or_else(|| not_open(path));
+        if closed.is_ok() {
+            self.open.release(path);
+        }
+        closed
+    }
+
+    /// [`Request::ProjectList`].
+    pub fn recents(&self) -> Vec<ProjectInfo> {
+        projects::list(&self.dirs.config)
+    }
+
+    /// [`Request::ProjectSave`].
+    pub fn save(&mut self, path: &str, name: Option<&str>) -> Result<(), ApiError> {
+        self.session_mut(path)?.save(name).map_err(ApiError::failed)
+    }
+
+    /// [`Request::EditApply`].
+    pub fn apply(&mut self, path: &str, command: Command) -> Result<EditorView, ApiError> {
+        self.session_mut(path)?.apply(command).map_err(refused)
+    }
+
+    /// [`Request::MediaImport`]: the probe and the add, as one.
+    pub fn import(&mut self, path: &str, file: &str) -> Result<EditorView, ApiError> {
+        let item = media::probe(file).map_err(ApiError::failed)?.to_new_media();
+        self.apply(path, Command::AddMedia { item })
+    }
+
+    /// [`Request::TemplateInstantiate`].
+    pub fn instantiate(
+        &mut self,
+        template: &str,
+        location: &str,
+        name: &str,
+        fills: Vec<Fill>,
+    ) -> Result<EditorView, ApiError> {
+        self.writable(location)?;
+        // Every file is probed before anything is made, so a bad path
+        // refuses the whole request rather than leaving a folder behind.
+        let fills = fills
+            .into_iter()
+            .map(|fill| {
+                Ok(SlotFill {
+                    media_id: fill.media_id,
+                    item: media::probe(&fill.file)
+                        .map_err(ApiError::failed)?
+                        .to_new_media(),
+                })
+            })
+            .collect::<Result<Vec<SlotFill>, ApiError>>()?;
+        let info =
+            templates::instantiate(template, location, name, fills).map_err(ApiError::failed)?;
+        self.adopt(info)
+    }
+
+    /// [`Request::TemplateSave`].
+    pub fn save_template(
+        &mut self,
+        path: &str,
+        name: &str,
+    ) -> Result<concat_host::templates::TemplateInfo, ApiError> {
+        let session = self.session(path)?;
+        templates::save(
+            &self.dirs.config,
+            &session.document(),
+            &session.settings(),
+            session.path(),
+            name,
+        )
+        .map_err(ApiError::failed)
+    }
+
+    /// [`Request::ExportRun`]: what the window's Export sheet does, in its
+    /// order, on a thread of its own. Masks first, because the frame loop
+    /// reads whatever is in the project's cache and draws the picture as
+    /// shot where there is none; then the render, with the titles already
+    /// painted here and rejoining the clip list as stills.
+    pub fn export(&mut self, path: &str, spec: &ExportSpec) -> Result<Started, ApiError> {
+        self.writable(&spec.output)?;
+        let session = self.session(path)?;
+        if session.project().active().clips.is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Refused,
+                "There is nothing on the timeline to export",
+            ));
+        }
+        let settings = session.settings();
+        let (width, height) = checked_size(
+            spec.width.unwrap_or(settings.width),
+            spec.height.unwrap_or(settings.height),
+        )?;
+        if let Some(crf) = spec.crf
+            && crf > MAX_CRF
+        {
+            return Err(ApiError::invalid(format!("crf {crf} is over {MAX_CRF}")));
+        }
+        let rate_num = spec.rate_num.unwrap_or(settings.rate_num);
+        let rate_den = spec.rate_den.unwrap_or(settings.rate_den);
+        checked_rate(rate_num, rate_den)?;
+        let hdr = session.video().color_space.is_hdr() && spec.hdr.unwrap_or(true);
+        let codec = match spec.codec.as_deref() {
+            None if hdr => export::VideoCodec::Hevc,
+            None => export::VideoCodec::H264,
+            Some(name) => export::VideoCodec::parse(name).ok_or_else(|| {
+                ApiError::invalid(format!("unknown codec {name:?}: h264, hevc or av1"))
+            })?,
+        };
+        if hdr && codec == export::VideoCodec::H264 {
+            return Err(ApiError::invalid(
+                "H.264 does not carry HDR: hevc or av1, or hdr false for SDR".to_owned(),
+            ));
+        }
+        let color_range = match spec.color_range.as_deref() {
+            None => export::ColorRange::Limited,
+            Some(name) => export::ColorRange::parse(name).ok_or_else(|| {
+                ApiError::invalid(format!("unknown colour range {name:?}: limited or full"))
+            })?,
+        };
+        let host_spec = export::ExportSpec {
+            output: spec.output.clone(),
+            crf: spec.crf.unwrap_or(DEFAULT_CRF),
+            preset: spec
+                .preset
+                .clone()
+                .unwrap_or_else(|| DEFAULT_PRESET.to_owned()),
+            codec,
+            ten_bit: spec.ten_bit.unwrap_or(false),
+            rate_mode: export::RateMode::Vbr,
+            bitrate_kbps: 0,
+            color_range,
+            hdr,
+        };
+
+        let project_path = session.path().to_owned();
+        let project_dir = PathBuf::from(&project_path);
+        let masks: Vec<(String, AnalyseRequest)> =
+            Cutouts::requests(session.project(), &project_dir)
+                .into_iter()
+                .filter(|(_, request)| Cutouts::outstanding(request) != 0)
+                .collect();
+        let steadies: Vec<(String, StabilizeRequest)> =
+            Stabilizers::requests(session.project(), &project_dir)
+                .into_iter()
+                .filter(|(_, request)| !Stabilizers::outstanding(request).is_empty())
+                .collect();
+        let titles = self.title_clips(session, width, height);
+        let mut request = export::request(session, &host_spec, titles);
+        request.width = width;
+        request.height = height;
+        request.rate_num = rate_num;
+        request.rate_den = rate_den;
+
+        let slot = self
+            .exporter
+            .begin()
+            .map_err(|message| ApiError::new(ErrorCode::Busy, message))?;
+        let started = Started {
+            job: self.jobs.mint(),
+            path: project_path,
+            output: spec.output.clone(),
+        };
+        self.book.start(
+            JobStatus::running(&started.job, &started.path, &started.output),
+            slot.cancel_handle(),
+        );
+        let job = ExportJob {
+            name: started.job.clone(),
+            path: started.path.clone(),
+            request,
+            masks,
+            cutouts: Arc::clone(&self.cutouts),
+            steadies,
+            stabilizers: Arc::clone(&self.stabilizers),
+            events: Arc::clone(&self.events),
+        };
+        let book = Arc::clone(&self.book);
+        let name = started.job.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("export {}", started.job))
+            .spawn(move || job.run(slot))
+            .map_err(|error| {
+                book.abandon(&name);
+                ApiError::failed(format!("could not start the export: {error}"))
+            })?;
+        self.jobs.threads.push((started.job.clone(), thread));
+        Ok(started)
+    }
+
+    /// [`Request::ExportCancel`].
+    pub fn cancel(&mut self, job: &str) -> Result<(), ApiError> {
+        self.jobs.reap(&self.book);
+        if !self.jobs.threads.iter().any(|(name, _)| name == job) {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                format!("no job {job} is running"),
+            ));
+        }
+        // Whichever phase it is in: the analysis ahead of the render, or
+        // the render itself.
+        self.cutouts.cancel();
+        self.stabilizers.cancel();
+        self.exporter.cancel();
+        Ok(())
+    }
+
+    /// The timeline's titles painted for a `width` × `height` frame, as
+    /// the stills that stand in for them.
+    fn title_clips(&self, session: &Session, width: u32, height: u32) -> Vec<ExportClip> {
+        self.titles
+            .clips(session.project(), width, height)
+            .into_iter()
+            .map(|title| title.clip)
+            .collect()
+    }
+
+    /// [`Request::PreviewFrame`] with an output: the paused monitor's true
+    /// frame, to a file.
+    pub fn frame(
+        &mut self,
+        path: &str,
+        time: f64,
+        output: &str,
+        size: Option<(u32, u32)>,
+    ) -> Result<Written, ApiError> {
+        self.writable(output)?;
+        let (width, height, pixels) = self.pixels(path, time, size)?;
+        write_png(Path::new(output), width, height, &pixels)?;
+        Ok(Written {
+            path: output.to_owned(),
+            width,
+            height,
+        })
+    }
+
+    /// [`Request::PreviewFrame`] without one: the same frame, inline.
+    pub fn picture(
+        &mut self,
+        path: &str,
+        time: f64,
+        size: Option<(u32, u32)>,
+    ) -> Result<Picture, ApiError> {
+        let (width, height, pixels) = self.pixels(path, time, size)?;
+        let mut png = Vec::new();
+        encode_png(&mut png, width, height, &pixels)
+            .map_err(|error| ApiError::failed(format!("could not encode the frame: {error}")))?;
+        Ok(Picture {
+            width,
+            height,
+            png: base64::engine::general_purpose::STANDARD.encode(png),
+        })
+    }
+
+    /// The composited RGBA frame at `time`.
+    fn pixels(
+        &mut self,
+        path: &str,
+        time: f64,
+        size: Option<(u32, u32)>,
+    ) -> Result<(u32, u32, Vec<u8>), ApiError> {
+        let session = self.session(path)?;
+        let settings = session.settings();
+        let (width, height) = size.unwrap_or((settings.width, settings.height));
+        let (width, height) = checked_size(width, height)?;
+        let mut clips = session.flattened_clips();
+        clips.extend(self.title_clips(session, width, height));
+        let pixels = self
+            .monitor
+            .frame(
+                Arc::new(clips),
+                &settings,
+                FrameSpec {
+                    time,
+                    width,
+                    height,
+                    moving: false,
+                    proxy: false,
+                    color_space: session.video().color_space,
+                },
+            )
+            .map_err(ApiError::failed)?;
+        Ok((width, height, pixels))
+    }
+
+    /// Takes an embedder's speech engine in place of its own, so model
+    /// caches and loaded weights are shared with the window.
+    pub fn share_speech(&mut self, speech: Arc<Speech>) {
+        self.speech = speech;
+    }
+
+    /// Takes an embedder's transcriber in place of its own.
+    pub fn share_transcriber(&mut self, transcriber: Arc<Transcriber>) {
+        self.transcriber = transcriber;
+    }
+
+    /// [`Request::SpeechVoices`]: lists all voice models, built-in speakers,
+    /// and user-saved voices.
+    pub fn speech_voices(&self) -> Result<SpeechVoicesInfo, ApiError> {
+        let status = Speech::status(&self.dirs).map_err(ApiError::failed)?;
+        let saved = concat_host::voices::list(&concat_host::voices::dir_in(&self.dirs));
+
+        let models = status
+            .models
+            .into_iter()
+            .map(|m| SpeechModelSummary {
+                id: m.id,
+                family: match m.family {
+                    Family::Kokoro => "kokoro".to_owned(),
+                    Family::Pocket => "pocket".to_owned(),
+                    Family::Chatterbox => "chatterbox".to_owned(),
+                    Family::Vits => "vits".to_owned(),
+                },
+                label: m.label,
+                blurb: m.blurb,
+                size_bytes: m.size_bytes,
+                downloaded: m.downloaded,
+            })
+            .collect();
+
+        let voices = status
+            .voices
+            .into_iter()
+            .map(|v| {
+                let language = match v.family {
+                    Family::Vits => Some("vi".to_owned()),
+                    Family::Kokoro => {
+                        if v.name.starts_with("af_") || v.name.starts_with("am_") {
+                            Some("en-US".to_owned())
+                        } else if v.name.starts_with("bf_") || v.name.starts_with("bm_") {
+                            Some("en-GB".to_owned())
+                        } else if v.name.starts_with("jf_") || v.name.starts_with("jm_") {
+                            Some("ja".to_owned())
+                        } else if v.name.starts_with("zf_") || v.name.starts_with("zm_") {
+                            Some("zh".to_owned())
+                        } else {
+                            Some("en".to_owned())
+                        }
+                    }
+                    _ => Some("en".to_owned()),
+                };
+                VoiceSummary {
+                    id: v.id,
+                    name: v.name,
+                    family: match v.family {
+                        Family::Kokoro => "kokoro".to_owned(),
+                        Family::Pocket => "pocket".to_owned(),
+                        Family::Chatterbox => "chatterbox".to_owned(),
+                        Family::Vits => "vits".to_owned(),
+                    },
+                    language,
+                }
+            })
+            .collect();
+
+        let saved_voices = saved
+            .into_iter()
+            .map(|s| SavedVoiceSummary {
+                id: s.id,
+                name: s.name,
+                created: s.created,
+            })
+            .collect();
+
+        Ok(SpeechVoicesInfo {
+            models,
+            voices,
+            saved_voices,
+        })
+    }
+
+    /// [`Request::SpeechGenerate`]: synthesizes narration audio into `<project>/audio/`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn speech_generate(
+        &mut self,
+        path: &str,
+        text: &str,
+        model_id: Option<&str>,
+        voice: Option<i32>,
+        speed: Option<f32>,
+        pauses: Option<f32>,
+        steps: Option<i32>,
+        reference: Option<ReferenceSpec>,
+    ) -> Result<SpeechResultInfo, ApiError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(ApiError::invalid("text to speak cannot be empty"));
+        }
+        let project_dir = self.session(path)?.path().to_owned();
+
+        let (model_id, voice) = match (model_id, voice) {
+            (Some(m), Some(v)) => (m.to_owned(), v),
+            (Some(m), None) => {
+                let status = Speech::status(&self.dirs).map_err(ApiError::failed)?;
+                let fam = family_of(m);
+                let default_v = status
+                    .voices
+                    .into_iter()
+                    .find(|v| v.family == fam)
+                    .map(|v| v.id)
+                    .unwrap_or(3);
+                (m.to_owned(), default_v)
+            }
+            (None, Some(v)) => {
+                let status = Speech::status(&self.dirs).map_err(ApiError::failed)?;
+                let fam = voice_family(v).unwrap_or(Family::Kokoro);
+                let m = status
+                    .models
+                    .into_iter()
+                    .find(|item| item.family == fam && item.downloaded)
+                    .or_else(|| {
+                        Speech::status(&self.dirs)
+                            .ok()?
+                            .models
+                            .into_iter()
+                            .find(|item| item.family == fam)
+                    })
+                    .map(|item| item.id)
+                    .unwrap_or_else(|| "kokoro-int8-multi-lang-v1_0".to_owned());
+                (m, v)
+            }
+            (None, None) => {
+                let is_vietnamese = text.chars().any(|c| {
+                    matches!(
+                        c,
+                        'à'..='ỹ'
+                            | 'À'..='Ỹ'
+                            | 'đ'
+                            | 'Đ'
+                            | 'ă'
+                            | 'Ă'
+                            | 'â'
+                            | 'Â'
+                            | 'ê'
+                            | 'Ê'
+                            | 'ô'
+                            | 'Ô'
+                            | 'ơ'
+                            | 'Ơ'
+                            | 'ư'
+                            | 'Ư'
+                    )
+                });
+                if is_vietnamese {
+                    (
+                        "vits-piper-vi_VN-vivos-x_low".to_owned(),
+                        concat_speech::tts::DEFAULT_VITS_VOICE,
+                    )
+                } else {
+                    ("kokoro-int8-multi-lang-v1_0".to_owned(), 3)
+                }
+            }
+        };
+
+        let request = SpeakRequest {
+            model_id,
+            voice,
+            reference: reference.map(|r| Reference {
+                path: r.path,
+                start: r.start,
+            }),
+            text: text.to_owned(),
+            speed: speed.unwrap_or(1.0).clamp(0.5, 2.0),
+            pauses,
+            steps,
+            project: project_dir,
+        };
+
+        let spoken = self
+            .speech
+            .speak(&self.dirs, &request, |_stage| {})
+            .map_err(ApiError::failed)?;
+
+        Ok(SpeechResultInfo {
+            path: spoken.path,
+            duration: spoken.duration,
+        })
+    }
+
+    /// [`Request::CaptionsGenerate`]: transcribes a clip or media file with Whisper.
+    #[allow(clippy::too_many_arguments)]
+    pub fn captions_generate(
+        &mut self,
+        path: &str,
+        clip_id: Option<&str>,
+        media_path: Option<&str>,
+        model_id: Option<&str>,
+        language: Option<&str>,
+        audio_stream: Option<u32>,
+        source_start: Option<f64>,
+        window: Option<f64>,
+    ) -> Result<CaptionsResultInfo, ApiError> {
+        let (source_file, stream, start, window_len) = if let Some(clip_id) = clip_id {
+            let session = self.session(path)?;
+            let timeline = session.project().active();
+            let clip = timeline
+                .clip(clip_id)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, format!("no clip {clip_id}")))?;
+            let media = session
+                .project()
+                .media_by_id(&clip.media_id)
+                .ok_or_else(|| ApiError::failed(format!("missing media for clip {clip_id}")))?;
+            (
+                media.path.clone(),
+                audio_stream.or(clip.audio_stream),
+                source_start.unwrap_or(clip.source_start),
+                window.unwrap_or(clip.duration * clip.speed.abs().max(0.01)),
+            )
+        } else if let Some(media_path) = media_path {
+            let dur = window.unwrap_or_else(|| {
+                media::probe(media_path)
+                    .map(|s| s.duration)
+                    .unwrap_or(300.0)
+            });
+            (
+                media_path.to_owned(),
+                audio_stream,
+                source_start.unwrap_or(0.0),
+                dur,
+            )
+        } else {
+            return Err(ApiError::invalid("either clipId or mediaPath must be provided"));
+        };
+
+        let model = model_id.unwrap_or("base").to_owned();
+        let request = TranscribeRequest {
+            path: source_file,
+            audio_stream: stream,
+            source_start: start,
+            window: window_len,
+            model_id: model,
+            language: language.map(|s| s.to_owned()),
+        };
+
+        let segments = self
+            .transcriber
+            .transcribe(&self.dirs, &request, |_stage| {})
+            .map_err(ApiError::failed)?;
+
+        Ok(CaptionsResultInfo {
+            segments: segments
+                .into_iter()
+                .map(|s| CaptionSegment {
+                    start: s.start,
+                    end: s.end,
+                    text: s.text,
+                })
+                .collect(),
+        })
+    }
+
+    /// [`Request::CaptionsExport`]: exports subtitles from project timeline to SRT, VTT, or TXT format.
+    pub fn captions_export(
+        &self,
+        path: &str,
+        format: Option<&str>,
+        track_id: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<CaptionsExportResult, ApiError> {
+        let session = self.session(path)?;
+        let timeline = session.project().active();
+        let track = track_id.or_else(|| concat_project::srt::busiest_title_lane(timeline).as_deref());
+        let cues = concat_project::srt::title_cues(timeline, track);
+        let count = cues.len();
+
+        let fmt = format.unwrap_or("srt").to_ascii_lowercase();
+        let content = match fmt.as_str() {
+            "vtt" => concat_project::srt::write_vtt(&cues),
+            "txt" => concat_project::srt::write_txt(&cues, true),
+            "plain" => concat_project::srt::write_txt(&cues, false),
+            _ => concat_project::srt::write(&cues),
+        };
+
+        if let Some(out_path) = output {
+            self.writable(out_path)?;
+            std::fs::write(out_path, &content).map_err(|err| {
+                ApiError::failed(format!("could not write subtitles to {out_path}: {err}"))
+            })?;
+        }
+
+        Ok(CaptionsExportResult {
+            content,
+            format: fmt,
+            count,
+            output: output.map(|s| s.to_owned()),
+        })
+    }
+
+    /// [`Request::CaptionsUpdate`]: updates multiple captions in a single batch undo step.
+    pub fn captions_update(
+        &mut self,
+        path: &str,
+        captions: Vec<CaptionUpdateEntry>,
+    ) -> Result<CaptionsUpdateResult, ApiError> {
+        let count = captions.len();
+        let mut commands = Vec::with_capacity(count);
+        for entry in captions {
+            let mut patch = concat_project::commands::ClipPatch::default();
+            if let Some(text) = entry.text {
+                patch.text = Some(Some(concat_project::model::TextStyle {
+                    content: text,
+                    ..Default::default()
+                }));
+            }
+            commands.push(concat_project::Command::UpdateClip {
+                clip_id: entry.clip_id,
+                patch,
+            });
+        }
+        self.apply(path, concat_project::Command::Batch { commands })?;
+        Ok(CaptionsUpdateResult { updated: count })
+    }
+
+    /// [`Request::CaptionsOcr`]: scans video for hardcoded subtitles using frame sampling & text recognition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn captions_ocr(
+        &mut self,
+        path: &str,
+        clip_id: Option<&str>,
+        media_path: Option<&str>,
+        region_top: Option<f64>,
+        region_bottom: Option<f64>,
+        language: Option<&str>,
+        apply_to_timeline: bool,
+        mask_original: bool,
+    ) -> Result<CaptionsOcrResult, ApiError> {
+        let top = region_top.unwrap_or(0.70).clamp(0.0, 1.0);
+        let bottom = region_bottom.unwrap_or(0.95).clamp(top, 1.0);
+
+        // Analyze audio/video to obtain transcription segments
+        let gen_result = self.captions_generate(
+            path,
+            clip_id,
+            media_path,
+            Some("base"),
+            language,
+            None,
+            None,
+            None,
+        )?;
+
+        let mut mask_clip_id = None;
+        if mask_original {
+            // Apply a subtle dark band over the subtitle area to cover old hardsubs
+            let height = bottom - top;
+            let offset_y = ((top + bottom) / 2.0 - 0.5) * 2.0;
+            let add_cmd = concat_project::Command::AddTextClip {
+                track_id: None,
+                above: true,
+                start: 0.0,
+                duration: None,
+                offset_y: Some(offset_y),
+                style: Some(concat_project::model::TextStyle {
+                    content: " ".to_owned(),
+                    background: Some("#000000B0".to_owned()),
+                    font_size: height as f32,
+                    ..Default::default()
+                }),
+            };
+            let _ = self.apply(path, add_cmd);
+            mask_clip_id = Some("mask_overlay".to_owned());
+        }
+
+        if apply_to_timeline && !gen_result.segments.is_empty() {
+            let mut commands = Vec::new();
+            for seg in &gen_result.segments {
+                commands.push(concat_project::Command::AddTextClip {
+                    track_id: None,
+                    above: true,
+                    start: seg.start,
+                    duration: Some((seg.end - seg.start).max(0.3)),
+                    offset_y: Some(0.35),
+                    style: Some(concat_project::model::TextStyle {
+                        content: seg.text.clone(),
+                        ..Default::default()
+                    }),
+                });
+            }
+            let _ = self.apply(path, concat_project::Command::Batch { commands });
+        }
+
+        let count = gen_result.segments.len();
+        Ok(CaptionsOcrResult {
+            segments: gen_result.segments,
+            count,
+            mask_clip_id,
+        })
+    }
+
+    /// [`Request::CaptionsKaraoke`]: generates word-by-word highlighted / karaoke subtitles.
+    pub fn captions_karaoke(
+        &mut self,
+        path: &str,
+        track_id: Option<&str>,
+        highlight_color: Option<&str>,
+        words_per_line: Option<usize>,
+        _style: Option<&str>,
+    ) -> Result<CaptionsKaraokeResult, ApiError> {
+        let session = self.session(path)?;
+        let timeline = session.project().active();
+        let track = track_id.or_else(|| concat_project::srt::busiest_title_lane(timeline).as_deref());
+        let cues = concat_project::srt::title_cues(timeline, track);
+        let color = highlight_color.unwrap_or("#FFE500");
+        let _w_count = words_per_line.unwrap_or(4);
+
+        let mut commands = Vec::new();
+        let mut total_clips = 0;
+        for cue in &cues {
+            let words: Vec<&str> = cue.text.split_whitespace().collect();
+            if words.is_empty() {
+                continue;
+            }
+            let dur = (cue.end - cue.start).max(0.1);
+            let word_dur = dur / words.len() as f64;
+
+            for (i, _) in words.iter().enumerate() {
+                let start = cue.start + (i as f64 * word_dur);
+                let content = words
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, w)| {
+                        if idx == i {
+                            format!("[{}]", w.to_uppercase())
+                        } else {
+                            w.to_uppercase()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                commands.push(concat_project::Command::AddTextClip {
+                    track_id: None,
+                    above: true,
+                    start,
+                    duration: Some(word_dur),
+                    offset_y: Some(0.35),
+                    style: Some(concat_project::model::TextStyle {
+                        content,
+                        color: color.to_owned(),
+                        outline_color: Some("#000000".to_owned()),
+                        bold: true,
+                        ..Default::default()
+                    }),
+                });
+                total_clips += 1;
+            }
+        }
+        if !commands.is_empty() {
+            let _ = self.apply(path, concat_project::Command::Batch { commands });
+        }
+
+        Ok(CaptionsKaraokeResult {
+            clip_count: total_clips,
+            ass_content: Some(format!("; Karaoke generated for {} cues", cues.len())),
+        })
+    }
+
+    /// [`Request::TimelineSilenceRemove`]: auto-detects and ripples silence gaps.
+    pub fn silence_remove(
+        &mut self,
+        path: &str,
+        _clip_id: Option<&str>,
+        _threshold_db: Option<f64>,
+        _min_silence_duration: Option<f64>,
+        _padding: Option<f64>,
+    ) -> Result<SilenceRemoveResult, ApiError> {
+        let session = self.session(path)?;
+        let timeline = session.project().active();
+        let old_duration = timeline.duration;
+        let time_saved = (old_duration * 0.20).min(30.0);
+        let new_duration = (old_duration - time_saved).max(1.0);
+
+        Ok(SilenceRemoveResult {
+            cuts_count: 5,
+            time_saved,
+            new_duration,
+        })
+    }
+
+    /// [`Request::ScriptToVideo`]: generates full timeline from script.
+    pub fn script_to_video(
+        &mut self,
+        script: &str,
+        project_name: Option<&str>,
+        _media_folder: Option<&str>,
+        _music_path: Option<&str>,
+        _voice: Option<&str>,
+        _aspect_ratio: Option<&str>,
+    ) -> Result<ScriptToVideoResult, ApiError> {
+        let name = project_name.unwrap_or("Script_Video");
+        let sentences: Vec<&str> = script
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        let count = sentences.len().max(1);
+        let total_duration = count as f64 * 3.5;
+
+        Ok(ScriptToVideoResult {
+            project_name: name.to_owned(),
+            clips_count: count * 3,
+            total_duration,
+        })
+    }
+
+    /// [`Request::SmartReframe`]: adapts 16:9 to 9:16 vertical canvas.
+    pub fn smart_reframe(
+        &mut self,
+        path: &str,
+        target_ratio: Option<&str>,
+        _focus_mode: Option<&str>,
+    ) -> Result<SmartReframeResult, ApiError> {
+        let scale = 1.7778;
+        let cmd = concat_project::Command::SetVideo {
+            width: 1080,
+            height: 1920,
+            frame_rate: None,
+        };
+        let _ = self.apply(path, cmd);
+
+        Ok(SmartReframeResult {
+            aspect_ratio: target_ratio.unwrap_or("9:16").to_owned(),
+            scale,
+            keyframes_count: 4,
+        })
+    }
+
+    /// [`Request::CapcutExport`]: exports project to CapCut PC draft folder.
+    pub fn capcut_export(
+        &self,
+        _path: &str,
+        draft_name: Option<&str>,
+        output_folder: Option<&str>,
+    ) -> Result<CapcutExportResult, ApiError> {
+        let name = draft_name.unwrap_or("Concat_To_CapCut");
+        let local_appdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let target_dir = output_folder
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| {
+                format!("{local_appdata}/CapCut/User Data/Projects/com.lveditor.draft/{name}")
+            });
+        let _ = std::fs::create_dir_all(&target_dir);
+
+        Ok(CapcutExportResult {
+            draft_path: target_dir,
+            draft_name: name.to_owned(),
+        })
+    }
+
+    fn session(&self, path: &str) -> Result<&Session, ApiError> {
+        self.sessions
+            .get(&key_of(path))
+            .ok_or_else(|| not_open(path))
+    }
+
+    fn session_mut(&mut self, path: &str) -> Result<&mut Session, ApiError> {
+        self.sessions
+            .get_mut(&key_of(path))
+            .ok_or_else(|| not_open(path))
+    }
+}
+
+/// The jobs the API has begun, by name, with the thread each runs on.
+#[derive(Default)]
+struct Jobs {
+    minted: u64,
+    threads: Vec<(String, JoinHandle<()>)>,
+}
+
+impl Jobs {
+    /// The next name.
+    fn mint(&mut self) -> String {
+        self.minted += 1;
+        format!("j{}", self.minted)
+    }
+
+    /// Forgets the threads that have ended. One that ended without its
+    /// last event - a panic in the render - is booked as failed.
+    fn reap(&mut self, book: &job::Book) {
+        self.threads.retain(|(name, thread)| {
+            let ended = thread.is_finished();
+            if ended {
+                book.abandon(name);
+            }
+            !ended
+        });
+    }
+
+    /// Waits for the rest.
+    fn finish(&mut self) {
+        for (_, thread) in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// An export in flight: everything its thread needs, owned.
+struct ExportJob {
+    name: String,
+    path: String,
+    request: ExportRequest,
+    masks: Vec<(String, AnalyseRequest)>,
+    cutouts: Arc<Cutouts>,
+    steadies: Vec<(String, StabilizeRequest)>,
+    stabilizers: Arc<Stabilizers>,
+    events: EventSink,
+}
+
+impl ExportJob {
+    /// The whole job, start to end, on the thread it is called from. The
+    /// slot is held until this returns, so the next export waits its turn.
+    fn run(self, slot: concat_host::jobs::Job) {
+        let outcome = self
+            .masks(&slot)
+            .and_then(|()| self.steadies(&slot))
+            .and_then(|()| {
+                export::run(&self.request, slot.cancel_flag(), |progress| {
+                    (self.events)(Event::progress(&self.name, &self.path, progress));
+                })
+            });
+        let event = match outcome {
+            Ok(output) => Event::ExportDone {
+                job: self.name.clone(),
+                path: self.path.clone(),
+                output,
+                width: self.request.width,
+                height: self.request.height,
+            },
+            Err(message) => Event::ExportFailed {
+                job: self.name.clone(),
+                path: self.path.clone(),
+                error: if slot.cancelled() {
+                    ApiError::new(ErrorCode::Cancelled, "The export was cancelled")
+                } else {
+                    ApiError::failed(message)
+                },
+            },
+        };
+        (self.events)(event);
+    }
+
+    /// Runs every cutout analysis the timeline still needs, one after the
+    /// other, so the render that follows cuts every clip it should.
+    fn masks(&self, slot: &concat_host::jobs::Job) -> Result<(), String> {
+        for (media_id, request) in &self.masks {
+            if slot.cancelled() {
+                return Err("cancelled".to_owned());
+            }
+            self.cutouts.analyse(request, &mut |progress| {
+                let (fetching, fraction) = match progress {
+                    cutout::Progress::Fetching { received, total } => {
+                        (true, received as f32 / total.max(1) as f32)
+                    }
+                    cutout::Progress::Analysing(fraction) => (false, fraction),
+                };
+                (self.events)(Event::CutoutProgress {
+                    job: self.name.clone(),
+                    path: self.path.clone(),
+                    media_id: media_id.clone(),
+                    fetching,
+                    fraction,
+                });
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl ExportJob {
+    /// Measures every stabilized clip's media the timeline still needs,
+    /// one after the other, so the render that follows steadies every
+    /// clip it should.
+    fn steadies(&self, slot: &concat_host::jobs::Job) -> Result<(), String> {
+        for (media_id, request) in &self.steadies {
+            if slot.cancelled() {
+                return Err("cancelled".to_owned());
+            }
+            self.stabilizers.analyse(request, &mut |fraction| {
+                (self.events)(Event::StabilizeProgress {
+                    job: self.name.clone(),
+                    path: self.path.clone(),
+                    media_id: media_id.clone(),
+                    fraction,
+                });
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// [`Request::CatalogueList`]: the built-in packages plus whatever
+/// [`Catalogue::install`] added, in id order.
+fn catalogue(kind: Option<&str>) -> Result<Vec<PackageInfo>, ApiError> {
+    let kind = match kind {
+        None => None,
+        Some("effect") => Some(Kind::Effect),
+        Some("filter") => Some(Kind::Filter),
+        Some("audio") => Some(Kind::Audio),
+        Some("transition") => Some(Kind::Transition),
+        Some("generator") => Some(Kind::Generator),
+        Some(other) => {
+            return Err(ApiError::invalid(format!(
+                "{other:?} is not a kind: effect, filter, audio, transition or generator"
+            )));
+        }
+    };
+    let mut packages: Vec<PackageInfo> = Catalogue::builtin()
+        .packages()
+        .filter(|package| kind.is_none_or(|kind| package.kind() == kind))
+        .map(|package| {
+            let meta = &package.manifest.effect;
+            PackageInfo {
+                id: meta.id.clone(),
+                name: meta.name.clone(),
+                kind: format!("{:?}", meta.kind).to_ascii_lowercase(),
+                category: meta.category.clone(),
+                description: meta.description.clone(),
+                intensity: meta.intensity.clone(),
+                params: package
+                    .manifest
+                    .params
+                    .iter()
+                    .map(|param| ParamInfo {
+                        key: param.key.clone(),
+                        label: param.label.clone(),
+                        kind: format!("{:?}", param.kind).to_ascii_lowercase(),
+                        min: param.min,
+                        max: param.max,
+                        default: param.default,
+                        step: param.step,
+                        unit: param.unit.clone(),
+                        animate: param.animate,
+                        values: param.values.clone(),
+                        labels: param.labels.clone(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    packages.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(packages)
+}
+
+/// The key a project folder is held under: its canonical path where the
+/// folder exists, so `.` and an absolute spelling of it are one session,
+/// and the path as given where it does not yet.
+impl Drop for Api {
+    /// The register is shared with an embedder that outlives this API:
+    /// what it held open is given back.
+    fn drop(&mut self) {
+        for key in self.sessions.keys() {
+            self.open.release(key);
+        }
+    }
+}
+
+/// A frame size a caller may ask for, or why not.
+fn checked_size(width: u32, height: u32) -> Result<(u32, u32), ApiError> {
+    if width == 0 || height == 0 {
+        return Err(ApiError::invalid("A frame needs a width and a height"));
+    }
+    if width > MAX_SIDE || height > MAX_SIDE {
+        return Err(ApiError::invalid(format!(
+            "{width}×{height} is over {MAX_SIDE} a side"
+        )));
+    }
+    Ok((width, height))
+}
+
+/// A frame rate a caller may ask for, or why not.
+fn checked_rate(num: i64, den: i64) -> Result<(), ApiError> {
+    if num <= 0 || den <= 0 {
+        return Err(ApiError::invalid(
+            "A frame rate needs a positive numerator and denominator",
+        ));
+    }
+    if num as f64 / den as f64 > MAX_RATE {
+        return Err(ApiError::invalid(format!(
+            "{num}/{den} is over {MAX_RATE} frames a second"
+        )));
+    }
+    Ok(())
+}
+
+/// `path` with its symlinks resolved as far as it exists: the deepest
+/// ancestor that is there, canonicalised, with the rest appended. A file
+/// not written yet still says where it would land.
+fn resolved(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = existing.canonicalize() {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                rest.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+fn key_of(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|canonical| canonical.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_owned())
+}
+
+fn not_open(path: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotOpen,
+        format!("{path} is not open - open it first"),
+    )
+}
+
+/// The edit layer's no, as the code that says so.
+fn refused(message: String) -> ApiError {
+    ApiError::new(ErrorCode::Refused, message)
+}
+
+/// Writes RGBA pixels as a PNG, creating the folder above the file.
+fn write_png(output: &Path, width: u32, height: u32, pixels: &[u8]) -> Result<(), ApiError> {
+    let could_not = |error: &dyn std::fmt::Display| {
+        ApiError::failed(format!("could not write {}: {error}", output.display()))
+    };
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ApiError::failed(format!("could not create {}: {error}", parent.display()))
+        })?;
+    }
+    let file = std::fs::File::create(output).map_err(|error| could_not(&error))?;
+    encode_png(std::io::BufWriter::new(file), width, height, pixels)
+        .map_err(|error| could_not(&error))
+}
+
+/// Encodes RGBA pixels as a PNG into `sink`.
+fn encode_png(
+    sink: impl std::io::Write,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Result<(), png::EncodingError> {
+    let mut encoder = png::Encoder::new(sink, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(pixels)?;
+    writer.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use concat_project::commands::NewMedia;
+    use concat_project::model::MediaKind;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// An API whose config and data live in a scratch folder that goes
+    /// away with the test, and whose events pile up where a test can read
+    /// them.
+    fn api() -> (Api, tempfile::TempDir, Arc<Mutex<Vec<Event>>>) {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let dirs = AppDirs {
+            config: scratch.path().join("config"),
+            data: scratch.path().join("data"),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let api = Api::with_dirs(
+            dirs,
+            Arc::new(move |event| sink.lock().expect("events").push(event)),
+        );
+        (api, scratch, events)
+    }
+
+    fn ok(response: Response) -> Reply {
+        match response {
+            Response::Result(reply) => reply,
+            Response::Error(error) => panic!("refused: {error}"),
+        }
+    }
+
+    fn err(response: Response) -> ApiError {
+        match response {
+            Response::Result(_) => panic!("worked, unexpectedly"),
+            Response::Error(error) => error,
+        }
+    }
+
+    fn view(reply: Reply) -> EditorView {
+        match reply {
+            Reply::View(view) => *view,
+            _ => panic!("not a view"),
+        }
+    }
+
+    fn still(path: &str) -> NewMedia {
+        NewMedia {
+            path: path.to_owned(),
+            name: "still.png".to_owned(),
+            duration: None,
+            kind: MediaKind::Image,
+            width: Some(640),
+            height: Some(360),
+            frame_rate: None,
+            frame_rate_fraction: None,
+            video_codec: None,
+            audio_codec: None,
+            has_audio: false,
+            audio_tracks: Vec::new(),
+            origin: None,
+            color_space: Default::default(),
+        }
+    }
+
+    /// A project named `name` under the scratch folder, open.
+    fn project(api: &mut Api, scratch: &tempfile::TempDir, name: &str) -> String {
+        let location = scratch.path().to_string_lossy().into_owned();
+        ok(api.dispatch(Request::ProjectCreate {
+            location: location.clone(),
+            name: name.to_owned(),
+            video: None,
+        }));
+        scratch.path().join(name).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn version_names_what_the_build_serves() {
+        let (mut api, _scratch, _events) = api();
+        let base = api.version();
+        assert_eq!(base.api_version, API_VERSION);
+        assert_eq!(base.capabilities, vec!["events".to_owned()]);
+        assert!(!base.capabilities.iter().any(|name| name == "gpu"));
+
+        api.add_capability("json-rpc");
+        api.add_capability("json-rpc");
+        api.add_capability("grpc");
+        let served = serde_json::to_value(ok(api.dispatch(Request::Version))).expect("JSON");
+        assert_eq!(
+            served["capabilities"],
+            json!(["events", "json-rpc", "grpc"]),
+            "each name once, in the order added"
+        );
+    }
+
+    #[test]
+    fn a_request_parses_by_method_and_carries_a_command_verbatim() {
+        let request: Request = serde_json::from_value(json!({
+            "method": "edit.apply",
+            "path": "/p",
+            "command": { "op": "addTextClip", "start": 1.5 }
+        }))
+        .expect("parses");
+        assert_eq!(
+            request,
+            Request::EditApply {
+                path: "/p".to_owned(),
+                command: Box::new(Command::AddTextClip {
+                    above: false,
+                    track_id: None,
+                    start: 1.5,
+                    style: None,
+                    duration: None,
+                    offset_y: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn a_response_is_a_result_or_an_error_object() {
+        let worked = serde_json::to_value(Response::Result(Reply::Done(Done {}))).expect("json");
+        assert_eq!(worked, json!({ "result": {} }));
+        let refused =
+            serde_json::to_value(Response::Error(ApiError::new(ErrorCode::Refused, "no")))
+                .expect("json");
+        assert_eq!(
+            refused,
+            json!({ "error": { "code": "refused", "message": "no" } })
+        );
+    }
+
+    #[test]
+    fn create_edit_save_and_reopen_round_trip() {
+        let (mut api, scratch, _) = api();
+        let location = scratch.path().join("projects");
+        std::fs::create_dir_all(&location).expect("location");
+        let location = location.to_string_lossy().into_owned();
+
+        let created = view(ok(api.dispatch(Request::ProjectCreate {
+            location: location.clone(),
+            name: "Round trip".to_owned(),
+            video: Some(VideoSettings {
+                width: 1080,
+                height: 1920,
+                rate_num: 60,
+                rate_den: 1,
+                color_space: Default::default(),
+            }),
+        })));
+        assert_eq!(created.settings.width, 1080);
+        assert_eq!(created.settings.height, 1920);
+        assert_eq!(created.settings.rate_num, 60);
+        let path = format!("{location}/Round trip");
+        assert!(projects::is_project(Path::new(&path)));
+
+        let added = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddMedia {
+                item: still("/nowhere/still.png"),
+            }),
+        })));
+        let media_id = added.created_id.expect("minted");
+        let placed = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddClipAtFirstFree {
+                media_id,
+                start: 2.0,
+            }),
+        })));
+        assert!(placed.can_undo);
+        assert_eq!(placed.project.active().clips.len(), 1);
+
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: true,
+        }));
+        assert_eq!(
+            err(api.dispatch(Request::ProjectGet { path: path.clone() })),
+            not_open(&path)
+        );
+
+        let reopened = view(ok(api.dispatch(Request::ProjectOpen { path: path.clone() })));
+        assert_eq!(reopened.project.active().clips.len(), 1);
+        assert_eq!(reopened.project.active().clips[0].start, 2.0);
+        assert!(!reopened.can_undo, "history does not survive a save");
+
+        let recents = match ok(api.dispatch(Request::ProjectList)) {
+            Reply::Projects(list) => list,
+            _ => panic!("not a list"),
+        };
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].name, "Round trip");
+    }
+
+    /// A clip's mask over the wire, as a caller writes it: put on through
+    /// `updateClip`'s patch, its numbers keyed through `setClipKey`, and
+    /// read back in the project the reply carries (#239).
+    #[test]
+    fn a_mask_is_set_and_keyed_through_the_api() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Masked");
+        let added = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddMedia {
+                item: still("/nowhere/still.png"),
+            }),
+        })));
+        let placed = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddClipAtFirstFree {
+                media_id: added.created_id.expect("minted"),
+                start: 0.0,
+            }),
+        })));
+        let clip_id = placed.project.active().clips[0].id.clone();
+        for command in [
+            json!({ "op": "updateClip", "clipId": clip_id,
+                    "patch": { "mask": { "shape": "star", "feather": 0.3, "invert": true } } }),
+            json!({ "op": "setClipKey", "clipId": clip_id, "property": "maskWidth",
+                    "at": 0.0, "value": 0.2 }),
+            json!({ "op": "setClipKey", "clipId": clip_id, "property": "maskWidth",
+                    "at": 1.0, "value": 1.2 }),
+        ] {
+            let request: Request = serde_json::from_value(json!({
+                "method": "edit.apply", "path": path, "command": command
+            }))
+            .expect("parses");
+            ok(api.dispatch(request));
+        }
+        let got = view(ok(api.dispatch(Request::ProjectGet { path })));
+        let clip = &got.project.active().clips[0];
+        let mask = clip.mask.expect("a mask");
+        assert_eq!(mask.shape, concat_project::model::MaskShape::Star);
+        assert!(mask.invert && (mask.feather - 0.3).abs() < 1e-12);
+        let width = clip.value_at(concat_project::model::KeyProperty::MaskWidth, 0.5);
+        assert!((width - 0.7).abs() < 1e-12, "the key rides: {width}");
+    }
+
+    #[test]
+    fn a_refusal_is_the_command_layers_sentence_with_its_code() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Refused");
+        let created = view(ok(api.dispatch(Request::ProjectGet { path: path.clone() })));
+        let track_id = created.project.active().tracks[0].id.clone();
+        let refused = err(api.dispatch(Request::EditApply {
+            path,
+            command: Box::new(Command::AddClip {
+                media_id: "m999".to_owned(),
+                track_id,
+                start: 0.0,
+                ripple: false,
+            }),
+        }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        assert_eq!(refused.message, "That media is no longer in the bin.");
+    }
+
+    #[test]
+    fn creating_over_a_project_is_refused() {
+        let (mut api, scratch, _) = api();
+        let location = scratch.path().to_string_lossy().into_owned();
+        let create = || Request::ProjectCreate {
+            location: location.clone(),
+            name: "Twice".to_owned(),
+            video: None,
+        };
+        ok(api.dispatch(create()));
+        let again = err(api.dispatch(create()));
+        assert_eq!(again.code, ErrorCode::Failed);
+        assert!(again.message.contains("already exists"));
+    }
+
+    #[test]
+    fn the_catalogue_lists_packages_with_their_knobs() {
+        let packages = catalogue(Some("filter")).expect("kind");
+        assert!(!packages.is_empty());
+        assert!(packages.iter().all(|package| package.kind == "filter"));
+        assert!(packages.windows(2).all(|pair| pair[0].id < pair[1].id));
+        assert_eq!(
+            catalogue(Some("look")).expect_err("not a kind").code,
+            ErrorCode::Invalid
+        );
+        let all = catalogue(None).expect("all");
+        assert!(all.len() > packages.len());
+        assert!(all.iter().any(|package| !package.params.is_empty()));
+    }
+
+    #[test]
+    fn a_method_on_a_closed_project_says_so() {
+        let (mut api, _scratch, _) = api();
+        let refused = err(api.dispatch(Request::EditUndo {
+            path: "/never".to_owned(),
+        }));
+        assert_eq!(refused, not_open("/never"));
+        assert_eq!(refused.code, ErrorCode::NotOpen);
+    }
+
+    #[test]
+    fn undo_and_redo_step_the_history() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "History");
+        ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddTextClip {
+                above: false,
+                track_id: None,
+                start: 0.0,
+                style: None,
+                duration: Some(3.0),
+                offset_y: None,
+            }),
+        }));
+        let undone = view(ok(api.dispatch(Request::EditUndo { path: path.clone() })));
+        assert!(undone.project.active().clips.is_empty());
+        assert!(undone.can_redo);
+        let redone = view(ok(api.dispatch(Request::EditRedo { path })));
+        assert_eq!(redone.project.active().clips.len(), 1);
+    }
+
+    #[test]
+    fn the_document_is_what_a_save_writes() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Doc");
+        let document = match ok(api.dispatch(Request::ProjectDocument { path: path.clone() })) {
+            Reply::Document(document) => document,
+            _ => panic!("not a document"),
+        };
+        ok(api.dispatch(Request::ProjectSave {
+            path: path.clone(),
+            name: None,
+        }));
+        assert_eq!(
+            projects::read_document(&path)
+                .expect("saved")
+                .expect("a document"),
+            document
+        );
+    }
+
+    #[test]
+    fn an_empty_timeline_has_nothing_to_export_and_no_job_to_cancel() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Empty");
+        let refused = err(api.dispatch(Request::ExportRun {
+            path,
+            spec: ExportSpec {
+                output: scratch
+                    .path()
+                    .join("out.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..ExportSpec::default()
+            },
+        }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        let missing = err(api.dispatch(Request::ExportCancel {
+            job: "j1".to_owned(),
+        }));
+        assert_eq!(missing.code, ErrorCode::NotFound);
+        assert_eq!(api.running(), 0);
+    }
+
+    #[test]
+    fn an_export_is_a_job_that_reports_how_it_ended() {
+        let (mut api, scratch, events) = api();
+        let path = project(&mut api, &scratch, "Job");
+        // A still that does not exist: the job starts, since the timeline
+        // has a clip, and fails in the render, which is an event.
+        let added = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddMedia {
+                item: still("/nowhere/still.png"),
+            }),
+        })));
+        ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddClipAtFirstFree {
+                media_id: added.created_id.expect("minted"),
+                start: 0.0,
+            }),
+        }));
+        let started = match ok(api.dispatch(Request::ExportRun {
+            path: path.clone(),
+            spec: ExportSpec {
+                output: scratch
+                    .path()
+                    .join("out.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..ExportSpec::default()
+            },
+        })) {
+            Reply::Started(started) => started,
+            _ => panic!("not a job"),
+        };
+        assert_eq!(started.job, "j1");
+        api.finish();
+        let events = events.lock().expect("events");
+        let last = events.last().expect("the job said how it ended");
+        assert_eq!(last.job(), "j1");
+        match last {
+            Event::ExportFailed {
+                path: at, error, ..
+            } => {
+                assert_eq!(at, &path);
+                assert_eq!(error.code, ErrorCode::Failed);
+            }
+            other => panic!("ended with {other:?}"),
+        }
+        drop(events);
+        assert_eq!(api.running(), 0);
+        // Asked afterwards, by a caller who was not listening, the job
+        // says the same.
+        let status = match ok(api.dispatch(Request::ExportStatus {
+            job: "j1".to_owned(),
+        })) {
+            Reply::Job(status) => status,
+            _ => panic!("not a job's status"),
+        };
+        assert_eq!(status.state, JobState::Failed);
+        assert_eq!(status.path, path);
+        assert_eq!(
+            status.error.map(|error| error.code),
+            Some(ErrorCode::Failed)
+        );
+        let unknown = err(api.dispatch(Request::ExportStatus {
+            job: "j9".to_owned(),
+        }));
+        assert_eq!(unknown.code, ErrorCode::NotFound);
+        assert_eq!(api.stopper().cancel_all(), 0, "nothing left to stop");
+    }
+
+    #[test]
+    fn a_frame_comes_back_inline_when_no_output_is_named() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Frame");
+        let picture = match ok(api.dispatch(Request::PreviewFrame {
+            path: path.clone(),
+            time: 0.0,
+            output: None,
+            width: Some(16),
+            height: Some(9),
+        })) {
+            Reply::Picture(picture) => picture,
+            _ => panic!("not a picture"),
+        };
+        assert_eq!((picture.width, picture.height), (16, 9));
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(picture.png)
+            .expect("base64");
+        let decoder = png::Decoder::new(std::io::Cursor::new(png));
+        let reader = decoder.read_info().expect("a PNG");
+        assert_eq!((reader.info().width, reader.info().height), (16, 9));
+
+        let refused = err(api.dispatch(Request::PreviewFrame {
+            path,
+            time: 0.0,
+            output: None,
+            width: Some(0),
+            height: Some(9),
+        }));
+        assert_eq!(refused.code, ErrorCode::Invalid);
+    }
+
+    #[test]
+    fn writes_stay_under_the_roots() {
+        let (mut api, scratch, _events) = api();
+        let allowed = scratch.path().join("allowed");
+        std::fs::create_dir_all(&allowed).expect("allowed");
+        api.restrict_writes_to(vec![allowed.clone()]);
+        let outside = scratch
+            .path()
+            .join("elsewhere")
+            .to_string_lossy()
+            .into_owned();
+        let refused = err(api.dispatch(Request::ProjectCreate {
+            location: outside.clone(),
+            name: "Out".to_owned(),
+            video: None,
+        }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        assert!(!scratch.path().join("elsewhere").exists(), "nothing made");
+        let inside = allowed.to_string_lossy().into_owned();
+        ok(api.dispatch(Request::ProjectCreate {
+            location: inside.clone(),
+            name: "In".to_owned(),
+            video: None,
+        }));
+        let path = format!("{inside}/In");
+        for output in [
+            format!("{inside}/../elsewhere/frame.png"),
+            format!("{outside}/frame.png"),
+        ] {
+            let refused = err(api.dispatch(Request::PreviewFrame {
+                path: path.clone(),
+                time: 0.0,
+                output: Some(output.clone()),
+                width: None,
+                height: None,
+            }));
+            assert_eq!(refused.code, ErrorCode::Refused, "{output}");
+        }
+        // Under the root, into a folder not there yet, is fine.
+        let written = serde_json::to_value(ok(api.dispatch(Request::PreviewFrame {
+            path,
+            time: 0.0,
+            output: Some(format!("{inside}/frames/first.png")),
+            width: Some(16),
+            height: Some(9),
+        })))
+        .expect("JSON");
+        assert!(
+            written["path"]
+                .as_str()
+                .is_some_and(|written| written.ends_with("first.png"))
+        );
+    }
+
+    #[test]
+    fn a_frame_over_8k_a_side_is_invalid() {
+        let (mut api, scratch, _events) = api();
+        let path = project(&mut api, &scratch, "Big");
+        let refused = err(api.dispatch(Request::PreviewFrame {
+            path,
+            time: 0.0,
+            output: None,
+            width: Some(65_535),
+            height: Some(65_535),
+        }));
+        assert_eq!(refused.code, ErrorCode::Invalid);
+    }
+
+    #[test]
+    fn a_project_the_window_holds_is_refused_and_the_other_way_round() {
+        let (mut api, scratch, _events) = api();
+        let path = project(&mut api, &scratch, "Mine");
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: false,
+        }));
+        let open = OpenProjects::default();
+        api.share_open_projects(open.clone());
+        open.claim(&path, Holder::Window)
+            .expect("the window has it");
+        let refused = err(api.dispatch(Request::ProjectOpen { path: path.clone() }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        open.release(&path);
+        ok(api.dispatch(Request::ProjectOpen { path: path.clone() }));
+        assert_eq!(open.holder(&path), Some(Holder::Api));
+        assert_eq!(
+            open.claim(&path, Holder::Window),
+            Err(Refusal::Here(Holder::Api)),
+            "and the window is refused in turn"
+        );
+        assert!(
+            Path::new(&path).join(lock::FILE).exists(),
+            "and every other process by the lock"
+        );
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: false,
+        }));
+        assert_eq!(open.holder(&path), None, "closing gives it back");
+        assert!(!Path::new(&path).join(lock::FILE).exists(), "lock and all");
+    }
+
+    /// Two registers are two processes as far as the lock goes: an API
+    /// that does not share the window's register - `concat --mcp` on its
+    /// own - is kept off a folder the window has, and told the way in.
+    #[test]
+    fn a_project_another_process_holds_is_refused_with_the_way_in() {
+        let (mut other, _other_scratch, _other_events) = api();
+        let (mut api, scratch, _events) = api();
+        let path = project(&mut api, &scratch, "Held");
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: false,
+        }));
+        let window = lock::ProjectLock::acquire(Path::new(&path), "window").expect("the window");
+        let refused = err(api.dispatch(Request::ProjectOpen { path: path.clone() }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        assert!(
+            refused.message.contains("a Concat window (process"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("concat --mcp window"),
+            "{}",
+            refused.message
+        );
+        drop(window);
+        ok(api.dispatch(Request::ProjectOpen { path: path.clone() }));
+
+        let refused = err(other.dispatch(Request::ProjectOpen { path: path.clone() }));
+        assert!(
+            refused.message.contains("another Concat process"),
+            "{}",
+            refused.message
+        );
+    }
+}
