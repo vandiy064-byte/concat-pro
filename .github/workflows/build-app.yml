@@ -556,7 +556,16 @@ jobs:
               tail -n 150 src/build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            echo "=== LAST 150 LINES OF BUILD LOG ==="
+            tail -n 150 src/build.log
           fi
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-log-${{ matrix.target }}
+          path: src/build.log
 
       # ── Package: macOS ─────────────────────────────────────────────────
       # An .app bundle: the binary, an icon set made from the repository's
