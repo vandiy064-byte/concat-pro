@@ -1268,7 +1268,8 @@ impl Api {
     ) -> Result<CaptionsExportResult, ApiError> {
         let session = self.session(path)?;
         let timeline = session.project().active();
-        let track = track_id.or_else(|| concat_project::srt::busiest_title_lane(timeline).as_deref());
+        let default_track = concat_project::srt::busiest_title_lane(timeline);
+        let track = track_id.or(default_track.as_deref());
         let cues = concat_project::srt::title_cues(timeline, track);
         let count = cues.len();
 
@@ -1407,7 +1408,8 @@ impl Api {
     ) -> Result<CaptionsKaraokeResult, ApiError> {
         let session = self.session(path)?;
         let timeline = session.project().active();
-        let track = track_id.or_else(|| concat_project::srt::busiest_title_lane(timeline).as_deref());
+        let default_track = concat_project::srt::busiest_title_lane(timeline);
+        let track = track_id.or(default_track.as_deref());
         let cues = concat_project::srt::title_cues(timeline, track);
         let color = highlight_color.unwrap_or("#FFE500");
         let _w_count = words_per_line.unwrap_or(4);
