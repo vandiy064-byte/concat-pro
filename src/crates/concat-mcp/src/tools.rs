@@ -1050,7 +1050,7 @@ fn captions_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<
 
     // If clip_id was provided, find its timeline start & speed to align captions properly
     let (clip_start, clip_speed) = if let Some(ref cid) = clip_id {
-        let proj = backend.call(request("project.get", json!({ "path": path })))?;
+        let proj = backend.call(request("project.get", json!({ "path": path }))?)?;
         let clip_info = proj
             .pointer("/activeTimeline/clips")
             .and_then(Value::as_array)
@@ -1116,7 +1116,7 @@ fn captions_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<
             "path": path,
             "command": { "op": "batch", "commands": commands }
         }),
-    ))?;
+    )?)?;
 
     let mut view = summary::view(&edit_result);
     view["captionsCount"] = json!(commands.len());
@@ -1163,7 +1163,7 @@ fn speech_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<Ou
     let import_result = backend.call(request(
         "media.import",
         json!({ "path": path, "file": audio_path }),
-    ))?;
+    )?)?;
     let media_id = import_result
         .get("createdId")
         .and_then(Value::as_str)
@@ -1189,7 +1189,7 @@ fn speech_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<Ou
     let place_result = backend.call(request(
         "edit.apply",
         json!({ "path": path, "command": add_command }),
-    ))?;
+    )?)?;
 
     let mut view = summary::view(&place_result);
     view["speech"] = json!({

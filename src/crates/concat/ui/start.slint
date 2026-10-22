@@ -1654,6 +1654,30 @@ component WideHome inherits Rectangle {
                 alignment: start;
 
                 // ── the greeting ─────────────────────────────────────
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        border-radius: 12px;
+                        background: @linear-gradient(90deg, #ff6fa344 0%, #b394ff44 100%);
+                        border-width: 1px;
+                        border-color: #ff6fa388;
+                        height: 24px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+                            Text {
+                                text: "✦ CONCAT PRO - ANIME TWILIGHT EDITION ✦";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #ffb8df;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 8px; }
+
                 Text {
                     text: root.recents-total == 0
                         ? I18n.t("start.welcome")
@@ -2083,8 +2107,26 @@ export component StartScreen inherits Rectangle {
 
     property <bool> narrow: root.phone || root.width < 680px;
 
-    background: Theme.launch-page;
+    background: @linear-gradient(135deg, #0d0a1a 0%, #17112e 40%, #25143d 75%, #34184a 100%);
     clip: true;
+
+    // Makoto Shinkai Dreamy Twilight Ambient Glows
+    Rectangle {
+        x: root.width - self.width + 100px;
+        y: -120px;
+        width: 650px;
+        height: 650px;
+        border-radius: 325px;
+        background: @radial-gradient(circle, #ff6fa322 0%, #b394ff14 50%, transparent 100%);
+    }
+    Rectangle {
+        x: -120px;
+        y: root.height - self.height + 80px;
+        width: 550px;
+        height: 550px;
+        border-radius: 275px;
+        background: @radial-gradient(circle, #ffb34015 0%, #b394ff0d 50%, transparent 100%);
+    }
 
     if !root.narrow: WideHome {
         width: root.width;

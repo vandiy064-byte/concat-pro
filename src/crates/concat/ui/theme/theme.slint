@@ -52,9 +52,8 @@ export global Theme {
     /// Settings > Appearance picks it (lib.rs, `on_settings_accent_changed`)
     /// the way it picks `dark`, and it retones the window the same way.
     /// Remembered by name rather than by number, so a list that grows or
-    /// reorders keeps everyone's choice; 0 is Lime, the default. One past
-    /// the last name is the custom colour, `accent-custom`.
-    in-out property <int> accent-choice: 0;
+    /// reorders keeps everyone's choice; 2 is Violet (Anime Twilight default).
+    in-out property <int> accent-choice: 2;
     /// A colour picked by hand in place of any on the list. Read only while
     /// `accent-choice` points past the list, and one colour under both
     /// palettes: whoever picked it picked what they see, and the three
