@@ -47,6 +47,7 @@ use concat_host::export::{self, Exporter};
 use concat_host::preview::{FrameSpec, Monitor};
 use concat_host::session::EditorView;
 use concat_host::stabilize::{StabilizeRequest, Stabilizers};
+use concat_host::templates::{self, SlotFill};
 use concat_host::{ProjectInfo, Session, Titles, lock, media, projects};
 use concat_project::Command;
 use concat_project::model::VideoSettings;
@@ -55,10 +56,13 @@ use concat_speech::transcribe::TranscribeRequest;
 use concat_speech::tts::{Family, Reference, SpeakRequest, family_of, voice_family};
 
 pub use message::{
-    API_VERSION, ApiError, CaptionSegment, CaptionsResultInfo, Dirs, Done, ErrorCode, Event,
-    ExportSpec, Fill, JobState, JobStatus, PackageInfo, ParamInfo, Picture, ReferenceSpec, Reply,
-    Request, Response, SavedVoiceSummary, SpeechModelSummary, SpeechResultInfo, SpeechVoicesInfo,
-    Started, VersionInfo, VoiceSummary, Written,
+    API_VERSION, ApiError, CapcutExportResult, CaptionSegment, CaptionUpdateEntry,
+    CaptionsExportResult, CaptionsKaraokeResult, CaptionsOcrResult, CaptionsResultInfo,
+    CaptionsUpdateResult, Dirs, Done, ErrorCode, Event, ExportSpec, Fill, JobState, JobStatus,
+    PackageInfo, ParamInfo, Picture, ReferenceSpec, Reply, Request, Response,
+    SavedVoiceSummary, ScriptToVideoResult, SilenceRemoveResult, SmartReframeResult,
+    SpeechModelSummary, SpeechResultInfo, SpeechVoicesInfo, Started, VersionInfo,
+    VoiceSummary, Written,
 };
 
 /// The export sheet's middle quality, and what an export gets when the
@@ -1213,7 +1217,8 @@ impl Api {
         } else if let Some(media_path) = media_path {
             let dur = window.unwrap_or_else(|| {
                 media::probe(media_path)
-                    .map(|s| s.duration)
+                    .ok()
+                    .and_then(|s| s.duration)
                     .unwrap_or(300.0)
             });
             (
@@ -1356,8 +1361,8 @@ impl Api {
                 offset_y: Some(offset_y),
                 style: Some(concat_project::model::TextStyle {
                     content: " ".to_owned(),
-                    background: Some("#000000B0".to_owned()),
-                    font_size: height as f32,
+                    background: "#000000B0".to_owned(),
+                    font_size: height,
                     ..Default::default()
                 }),
             };
@@ -1441,8 +1446,9 @@ impl Api {
                     style: Some(concat_project::model::TextStyle {
                         content,
                         color: color.to_owned(),
-                        outline_color: Some("#000000".to_owned()),
-                        bold: true,
+                        stroke_width: 0.05,
+                        stroke_color: "#000000".to_owned(),
+                        font_weight: 700.0,
                         ..Default::default()
                     }),
                 });
@@ -1470,7 +1476,7 @@ impl Api {
     ) -> Result<SilenceRemoveResult, ApiError> {
         let session = self.session(path)?;
         let timeline = session.project().active();
-        let old_duration = timeline.duration;
+        let old_duration = timeline.duration();
         let time_saved = (old_duration * 0.20).min(30.0);
         let new_duration = (old_duration - time_saved).max(1.0);
 
@@ -1515,10 +1521,14 @@ impl Api {
         _focus_mode: Option<&str>,
     ) -> Result<SmartReframeResult, ApiError> {
         let scale = 1.7778;
-        let cmd = concat_project::Command::SetVideo {
-            width: 1080,
-            height: 1920,
-            frame_rate: None,
+        let timeline_id = self.session(path)?.project().active().id.clone();
+        let cmd = concat_project::Command::SetTimelineVideo {
+            timeline_id,
+            video: VideoSettings {
+                width: 1080,
+                height: 1920,
+                ..Default::default()
+            },
         };
         let _ = self.apply(path, cmd);
 
