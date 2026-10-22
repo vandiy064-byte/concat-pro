@@ -112,8 +112,6 @@ env:
 jobs:
   app:
     name: ${{ matrix.platform }}-${{ matrix.arch }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
