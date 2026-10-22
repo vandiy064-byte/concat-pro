@@ -80,6 +80,9 @@ export struct ExportData {
     done-size: string,
     /// nothing on the timeline to export
     empty: bool,
+    has-subtitles: bool,
+    export-subtitles: bool,
+    written-srt: string,
 }
 
 // One tile of the summary block.
@@ -275,6 +278,8 @@ component OutputSection inherits DialogSection {
     callback codec-changed(index: int);
     callback ten-bit-changed(on: bool);
     callback hdr-changed(on: bool);
+    callback export-subtitles-changed(on: bool);
+    callback export-srt-only();
 
     title: I18n.t("export.output");
 
@@ -381,6 +386,33 @@ component OutputSection inherits DialogSection {
                     checked: root.data.ten-bit;
                     toggled(on) => { root.ten-bit-changed(on); }
                 }
+            }
+        }
+    }
+
+    if root.data.has-subtitles: DialogRow {
+        label: I18n.t("export.exportSubtitlesSrt");
+        HorizontalLayout {
+            alignment: end;
+            VerticalLayout {
+                alignment: center;
+                Switch {
+                    checked: root.data.export-subtitles;
+                    toggled(on) => { root.export-subtitles-changed(on); }
+                }
+            }
+        }
+    }
+
+    if root.data.has-subtitles: DialogRow {
+        label: I18n.t("export.exportSrtOnly");
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                label: I18n.t("export.exportSrtNow");
+                glyph: Glyph.export;
+                ghost: true;
+                clicked => { root.export-srt-only(); }
             }
         }
     }
@@ -493,6 +525,23 @@ component ExportFooter inherits VerticalLayout {
         }
     }
 
+    if root.data.phase == ExportPhase.done && root.data.written-srt != "": HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+
+        VerticalLayout {
+            alignment: center;
+            Icon { glyph: Glyph.check; size: 13px; tint: Theme.green; }
+        }
+
+        Text {
+            text: I18n.t1("export.exportedWithSubtitles", root.data.written-srt);
+            color: Theme.fg-muted;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+        }
+    }
+
     if root.data.phase == ExportPhase.done: HorizontalLayout {
         spacing: 6px;
         alignment: start;
@@ -567,6 +616,8 @@ export component ExportDialog inherits Rectangle {
     callback ten-bit-changed(on: bool);
     callback hdr-changed(on: bool);
     callback bitrate-changed(mbps: float);
+    callback export-subtitles-changed(on: bool);
+    callback export-srt-only();
     callback begin();
     callback cancel();
     callback reveal();
@@ -703,6 +754,8 @@ export component ExportDialog inherits Rectangle {
                             codec-changed(index) => { root.codec-changed(index); }
                             ten-bit-changed(on) => { root.ten-bit-changed(on); }
                             hdr-changed(on) => { root.hdr-changed(on); }
+                            export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
+                            export-srt-only => { root.export-srt-only(); }
                         }
                     }
 
@@ -742,6 +795,8 @@ export component ExportDialog inherits Rectangle {
                                 codec-changed(index) => { root.codec-changed(index); }
                                 ten-bit-changed(on) => { root.ten-bit-changed(on); }
                                 hdr-changed(on) => { root.hdr-changed(on); }
+                                export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
+                                export-srt-only => { root.export-srt-only(); }
                             }
                         }
                     }
@@ -776,6 +831,8 @@ export component ExportDialog inherits Rectangle {
                                 codec-changed(index) => { root.codec-changed(index); }
                                 ten-bit-changed(on) => { root.ten-bit-changed(on); }
                                 hdr-changed(on) => { root.hdr-changed(on); }
+                                export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
+                                export-srt-only => { root.export-srt-only(); }
                             }
                         }
 

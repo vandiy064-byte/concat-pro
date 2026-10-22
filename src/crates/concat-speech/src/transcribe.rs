@@ -657,6 +657,7 @@ mod real_audio {
             source_start: 0.0,
             window: 30.0,
             model_id: "tiny.en".to_owned(),
+            language: None,
         };
         let segments = transcriber
             .transcribe(&dirs, &request, |stage| eprintln!("{stage:?}"))

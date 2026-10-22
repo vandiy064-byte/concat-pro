@@ -1862,6 +1862,12 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     app.on_export_start(on_window!(|state| {
         state.handle(Msg::Export(ExportMsg::Start));
     }));
+    app.on_export_subtitles_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Export(ExportMsg::ExportSubtitlesChanged(on)));
+    }));
+    app.on_export_srt_only(on_window!(|state| {
+        state.handle(Msg::Export(ExportMsg::ExportSrtOnly));
+    }));
 
     // ── settings ──
     app.on_settings_page_changed(on_window!(|state, index: i32| {

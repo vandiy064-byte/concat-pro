@@ -253,6 +253,8 @@ export component App inherits Window {
     callback export-cancel();
     callback export-reveal();
     callback export-again();
+    callback export-subtitles-changed(on: bool);
+    callback export-srt-only();
 
     callback settings-closed();
     callback settings-page-changed(index: int);
@@ -816,6 +818,8 @@ export component App inherits Window {
         cancel => { root.export-cancel(); }
         reveal => { root.export-reveal(); }
         again => { root.export-again(); }
+        export-subtitles-changed(on) => { root.export-subtitles-changed(on); }
+        export-srt-only => { root.export-srt-only(); }
     }
 
     SettingsDialog {

@@ -64,6 +64,8 @@ pub enum ExportMsg {
     /// The phone has moved the file to where it shows it - the path under
     /// the phone's storage - or could not, and the file is where it was.
     Published(Result<String, String>),
+    ExportSubtitlesChanged(bool),
+    ExportSrtOnly,
 }
 
 /// The export sheet's state.
@@ -91,6 +93,10 @@ pub struct ExportPane {
     pub written: String,
     /// When the render started, for a real ETA.
     started_at: Option<std::time::Instant>,
+    /// Whether to also export subtitles as .srt alongside the video.
+    pub export_subtitles: bool,
+    /// The name of the written .srt subtitle file for notification/status.
+    pub written_srt: String,
 }
 
 impl Default for ExportPane {
@@ -119,6 +125,8 @@ impl Default for ExportPane {
             message: String::new(),
             written: String::new(),
             started_at: None,
+            export_subtitles: true,
+            written_srt: String::new(),
         }
     }
 }
@@ -134,6 +142,7 @@ impl ExportPane {
                 self.open = true;
                 self.phase = ExportPhase::Idle;
                 self.message.clear();
+                self.written_srt.clear();
                 // The timeline's own size: the one rung that can be picked;
                 // and its own rate, first on the rate list.
                 self.resolution = Self::own_rung(studio);
@@ -203,6 +212,24 @@ impl ExportPane {
                 self.phase = ExportPhase::Done;
                 self.progress = 1.0;
                 self.written = written.clone();
+                if self.export_subtitles {
+                    let cues = concat_project::srt::title_cues(studio.timeline(), None);
+                    if !cues.is_empty() {
+                        let srt_path = std::path::Path::new(&written).with_extension("srt");
+                        let srt_text = concat_project::srt::write(&cues);
+                        if let Err(error) = std::fs::write(&srt_path, &srt_text) {
+                            log::warn!("export: could not write srt {}: {error}", srt_path.display());
+                        } else {
+                            let srt_name = srt_path
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "subtitles.srt".to_string());
+                            log::info!("export: wrote {} subtitle cue(s) to {}", cues.len(), srt_path.display());
+                            self.written_srt = srt_name.clone();
+                            studio.notify(&tf("export.exportedWithSubtitles", &[&srt_name]), false);
+                        }
+                    }
+                }
                 // A phone moves the file to where its gallery shows it, and
                 // the sheet says "finished" once it is there.
                 let handed = platform::publish_export(written.into(), |result| {
@@ -214,6 +241,8 @@ impl ExportPane {
                     studio.notify(&t("export.exportFinished"), false);
                 }
             }
+            ExportMsg::ExportSubtitlesChanged(on) => self.export_subtitles = on,
+            ExportMsg::ExportSrtOnly => self.export_srt_only(studio),
             ExportMsg::Published(Ok(path)) => {
                 self.written = path;
                 studio.notify(&t("export.exportFinished"), false);
@@ -634,6 +663,30 @@ impl ExportPane {
             message: self.message.as_str().into(),
             done_size: bytes(self.size_bytes(studio)).into(),
             empty: clips == 0,
+            has_subtitles: titles > 0,
+            export_subtitles: self.export_subtitles,
+            written_srt: self.written_srt.as_str().into(),
+        }
+    }
+
+    /// Directly exports only the subtitle SRT file from timeline to target folder.
+    fn export_srt_only(&mut self, studio: &mut Studio) {
+        let cues = concat_project::srt::title_cues(studio.timeline(), None);
+        if cues.is_empty() {
+            studio.notify(&i18n::t("export.noSubtitlesOnTimeline"), true);
+            return;
+        }
+        let srt_name = format!("{}.srt", self.name.trim());
+        let srt_folder = self.folder.clone();
+        let srt_path = std::path::Path::new(&srt_folder).join(&srt_name);
+        let srt_text = concat_project::srt::write(&cues);
+        if let Err(error) = std::fs::write(&srt_path, &srt_text) {
+            log::warn!("export: could not write srt {}: {error}", srt_path.display());
+            studio.notify(&i18n::tf("captions.couldNotWriteSubtitles", &[&error.to_string()]), true);
+        } else {
+            log::info!("export: wrote {} cues to {}", cues.len(), srt_path.display());
+            self.written_srt = srt_name.clone();
+            studio.notify(&i18n::tf("export.exportedWithSubtitles", &[&srt_name]), false);
         }
     }
 }
@@ -687,5 +740,32 @@ mod tests {
         assert_eq!(ExportPane::rate_name((25, 1)), "25 fps");
         assert_eq!(ExportPane::rate_name((15, 1)), "15 fps");
         assert_eq!(ExportPane::rate_name((12500, 1000)), "12.5 fps");
+    }
+
+    #[test]
+    fn export_subtitles_toggle_and_defaults() {
+        let mut pane = ExportPane::default();
+        assert!(pane.export_subtitles);
+        assert!(pane.written_srt.is_empty());
+
+        pane.export_subtitles = false;
+        assert!(!pane.export_subtitles);
+
+        let cues = vec![
+            concat_project::srt::Cue {
+                start: 0.0,
+                end: 2.5,
+                text: "Xin chào thế giới".into(),
+            },
+            concat_project::srt::Cue {
+                start: 2.8,
+                end: 5.0,
+                text: "Xuất video kèm phụ đề SRT".into(),
+            },
+        ];
+        let srt_text = concat_project::srt::write(&cues);
+        assert!(srt_text.contains("Xin chào thế giới"));
+        assert!(srt_text.contains("00:00:00,000 --> 00:00:02,500"));
+        assert!(srt_text.contains("00:00:02,800 --> 00:00:05,000"));
     }
 }
