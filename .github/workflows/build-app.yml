@@ -112,6 +112,8 @@ env:
 jobs:
   app:
     name: ${{ matrix.platform }}-${{ matrix.arch }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -1171,8 +1173,31 @@ jobs:
         shell: pwsh
         run: Remove-Item -Force -DeleteKey "Cert:\CurrentUser\My\$env:SIGNING_THUMBPRINT"
 
+      - name: Generate Manifest and Checksums (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/models.py release-manifest --version $env:VERSION --tag "v$env:VERSION" --bundles stage --out stage/manifest.json
+          Get-FileHash -Path stage\* -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } | Set-Content -Path stage/SHA256SUMS
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Concat-${{ matrix.platform }}-${{ matrix.arch }}
           path: stage/*
           if-no-files-found: error
+
+      - name: Publish to GitHub Releases
+        if: matrix.platform == 'windows' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Concat v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: stage/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
@@ -34,9 +35,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "models" / "manifest.toml"
 CRATES = ROOT / "src" / "crates"
 
-# The repository the mirror lives on, and the engine constant that must
-# agree with this file about which release holds it.
-REPO = "jub0t/Concat"
+# The repository the releases and packages are published on.
+REPO = os.environ.get("GITHUB_REPOSITORY", "vandiy064-byte/concat-pro")
 HOST_MODELS = CRATES / "concat-host" / "src" / "models.rs"
 
 # Where each family's table lives in the engine, for --check.
