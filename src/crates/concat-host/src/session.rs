@@ -438,7 +438,9 @@ mod tests {
 
         // 3. UTF-8 Vietnamese name round-trips correctly
         let vi_name = "Dự án Concat Tiếng Việt";
-        session.save(Some(vi_name)).expect("saves with Vietnamese name");
+        session
+            .save(Some(vi_name))
+            .expect("saves with Vietnamese name");
         assert_eq!(session.settings().name, vi_name);
 
         let saved_json = std::fs::read_to_string(scratch.join("concat.json")).expect("reads");

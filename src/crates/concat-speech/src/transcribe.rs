@@ -492,10 +492,12 @@ impl Transcriber {
         // one percent - so it is simply told English.
         let language = if !context.is_multilingual() {
             "en"
-        } else if let Some(lang) = request.language.as_deref().filter(|l| !l.is_empty()) {
-            lang
         } else {
-            "auto"
+            request
+                .language
+                .as_deref()
+                .filter(|l| !l.is_empty())
+                .unwrap_or("auto")
         };
         params.set_language(Some(language));
         params.set_print_special(false);
