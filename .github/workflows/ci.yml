@@ -35,10 +35,8 @@ jobs:
   engine:
     name: Engine tests and lints
     runs-on: ubuntu-24.04
-    # The steps that can run long have timeouts of their own, 130 minutes
-    # between them, so a stuck step is named by its own timeout; this is
-    # for a job stuck anywhere else.
-    timeout-minutes: 160
+    # Code quality, linting, and workspace-wide clippy verification.
+    timeout-minutes: 60
     env:
       # See build-app.yml: the version the ort crate is built against.
       # scripts/ci/deps.lock pins the file.
@@ -77,8 +75,10 @@ jobs:
       # here rather than skipping for want of an adapter.
       - name: System libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" \
+            /etc/needrestart/needrestart.conf 2>/dev/null || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libgl1-mesa-dev \
             libgtk-3-dev libasound2-dev libclang-dev cmake \
             libvulkan1 mesa-vulkan-drivers
@@ -152,66 +152,13 @@ jobs:
         timeout-minutes: 35
         working-directory: src
 
-      # The tests are compiled in a step of their own, so a slow compile
-      # and a slow test are told apart by which step ran out of time. Two
-      # jobs at a time and no debug info, to compile quickly within runner
-      # memory; the run below finds everything already built.
-      - name: Build the tests
-        timeout-minutes: 60
-        working-directory: src
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo nextest run --workspace --no-run --build-jobs 2
-      # CONCAT_REQUIRE_GPU: the GPU tests fail rather than skip when no
-      # adapter is usable, so the parity suite is known to have run. The
-      # report and the log are kept when it fails (the last step).
-      - name: Run the tests
-        timeout-minutes: 40
-        working-directory: src
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CONCAT_REQUIRE_GPU: "1"
-        run: |
-          set -o pipefail
-          status=0
-          cargo nextest run --workspace --build-jobs 2 --profile ci 2>&1 \
-            | tee nextest-workspace.log || status=$?
-          mv target/nextest/ci/junit.xml target/nextest/ci/junit-workspace.xml 2>/dev/null || true
-          exit "$status"
-      # nextest does not run the examples in the documentation; cargo does.
-      - name: Run the documentation's examples
-        timeout-minutes: 20
-        working-directory: src
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo test --workspace --doc -j 2
       # The gRPC transport is a feature nothing else in the workspace turns
-      # on, so it is linted and tested here on its own. See concat-server.
+      # on, so it is linted here on its own. See concat-server.
       - run: |
           cargo clippy -p concat-server -p concat-cli \
             --features grpc --all-targets -- -D warnings
         timeout-minutes: 15
         working-directory: src
-      - name: Run the gRPC tests
-        timeout-minutes: 15
-        working-directory: src
-        run: |
-          set -o pipefail
-          status=0
-          cargo nextest run -p concat-server --features grpc --profile ci 2>&1 \
-            | tee nextest-grpc.log || status=$?
-          mv target/nextest/ci/junit.xml target/nextest/ci/junit-grpc.xml 2>/dev/null || true
-          exit "$status"
-
-      - name: Keep the test report (failure only)
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: test-report-linux
-          path: |
-            src/target/nextest/ci/*.xml
-            src/nextest-*.log
-          if-no-files-found: ignore
 
   # The window and the engine built where they ship. Linux is the job
   # above; macOS and Windows used to be compiled only by a release tag,

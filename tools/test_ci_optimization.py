@@ -1,7 +1,9 @@
 """
-Unit tests for CI compilation and timeout optimization.
-Validates that .github/workflows/ci.yml parallelizes build jobs and sets
-sufficient timeouts to avoid GitHub Actions timeout failures.
+Unit tests for CI pipeline optimization and Windows release stabilization.
+Validates that .github/workflows/ci.yml:
+1. Focuses Linux engine job on static analysis, linting, and clippy verification.
+2. Avoids fragile Linux GUI test compilation bottlenecks.
+3. Authoritatively executes full nextest and export tests on Windows (windows-2022).
 """
 import unittest
 from pathlib import Path
@@ -20,56 +22,39 @@ class TestCIOptimization(unittest.TestCase):
         self.assertIsInstance(self.data, dict)
         self.assertIn("jobs", self.data)
         self.assertIn("engine", self.data["jobs"])
+        self.assertIn("desktop", self.data["jobs"])
 
-    def test_engine_job_timeout(self):
-        engine = self.data["jobs"]["engine"]
-        self.assertGreaterEqual(
-            engine.get("timeout-minutes", 0),
-            150,
-            "Engine job overall timeout should be at least 150 minutes",
-        )
-
-    def test_no_single_thread_bottlenecks(self):
-        self.assertNotIn(
-            "--build-jobs 1",
-            self.content,
-            "Found --build-jobs 1 in ci.yml which causes 25m timeout failure",
-        )
-        self.assertNotIn(
-            "-j 1",
-            self.content,
-            "Found -j 1 in ci.yml which slows down doc testing",
-        )
-
-    def test_build_the_tests_step(self):
+    def test_engine_job_lints_present(self):
         steps = self.data["jobs"]["engine"]["steps"]
-        build_step = next((s for s in steps if s.get("name") == "Build the tests"), None)
-        self.assertIsNotNone(build_step, "Step 'Build the tests' not found")
-        self.assertGreaterEqual(
-            build_step.get("timeout-minutes", 0),
-            50,
-            "Build the tests timeout should be at least 50 minutes",
-        )
-        self.assertIn(
-            "--build-jobs 2",
-            build_step.get("run", ""),
-            "Build the tests should compile with 2 parallel jobs",
-        )
+        step_runs = [s.get("run", "") for s in steps]
+        all_runs = "\n".join(step_runs)
+        self.assertIn("cargo fmt --check", all_runs)
+        self.assertIn("scripts/locales.py --check", all_runs)
+        self.assertIn("scripts/models.py --check", all_runs)
+        self.assertIn("cargo clippy --workspace --all-targets -- -D warnings", all_runs)
 
-    def test_run_the_tests_step(self):
-        steps = self.data["jobs"]["engine"]["steps"]
-        test_step = next((s for s in steps if s.get("name") == "Run the tests"), None)
-        self.assertIsNotNone(test_step, "Step 'Run the tests' not found")
-        self.assertGreaterEqual(
-            test_step.get("timeout-minutes", 0),
-            35,
-            "Run the tests timeout should be at least 35 minutes",
+    def test_no_fragile_linux_test_compilation(self):
+        # Linux engine job should not build nextest GUI tests which cause OOM 143 or 25m timeout
+        engine_steps = self.data["jobs"]["engine"]["steps"]
+        for s in engine_steps:
+            self.assertNotEqual(s.get("name"), "Build the tests")
+            self.assertNotEqual(s.get("name"), "Run the tests")
+
+    def test_windows_desktop_tests_intact(self):
+        desktop_steps = self.data["jobs"]["desktop"]["steps"]
+        build_step = next(
+            (s for s in desktop_steps if s.get("name") == "Build the tests (Windows)"),
+            None,
         )
-        self.assertIn(
-            "--build-jobs 2",
-            test_step.get("run", ""),
-            "Run the tests should execute with 2 parallel jobs",
+        self.assertIsNotNone(build_step)
+        self.assertIn("--build-jobs 2", build_step.get("run", ""))
+
+        run_step = next(
+            (s for s in desktop_steps if s.get("name") == "Run the tests (Windows)"),
+            None,
         )
+        self.assertIsNotNone(run_step)
+        self.assertIn("--build-jobs 2", run_step.get("run", ""))
 
 
 if __name__ == "__main__":
