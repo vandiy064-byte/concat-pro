@@ -1956,7 +1956,12 @@ mod tests {
         let (mut api, _scratch, _events) = api();
         let base = api.version();
         assert_eq!(base.api_version, API_VERSION);
-        assert_eq!(base.capabilities, vec!["events".to_owned()]);
+        let expected_base = vec![
+            "events".to_owned(),
+            "speech".to_owned(),
+            "transcribe".to_owned(),
+        ];
+        assert_eq!(base.capabilities, expected_base);
         assert!(!base.capabilities.iter().any(|name| name == "gpu"));
 
         api.add_capability("json-rpc");
@@ -1965,7 +1970,7 @@ mod tests {
         let served = serde_json::to_value(ok(api.dispatch(Request::Version))).expect("JSON");
         assert_eq!(
             served["capabilities"],
-            json!(["events", "json-rpc", "grpc"]),
+            json!(["events", "speech", "transcribe", "json-rpc", "grpc"]),
             "each name once, in the order added"
         );
     }

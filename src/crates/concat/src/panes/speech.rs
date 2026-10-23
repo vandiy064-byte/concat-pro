@@ -1193,8 +1193,8 @@ mod tests {
         assert_eq!(voice_label("nova").0, "Nova");
         assert_eq!(voice_label("pocket_bria").0, "Bria");
         assert!(voice_label("pocket_bria").1.contains("Pocket"));
-        assert_eq!(voice_label("pocket_clone").0.contains("clip"), true);
-        assert_eq!(voice_label("chatterbox_clone").0.contains("clip"), true);
+        assert!(voice_label("pocket_clone").0.contains("clip"));
+        assert!(voice_label("chatterbox_clone").0.contains("clip"));
         let (title, detail) = voice_label("vf_vivos");
         assert_eq!(title, "Vivos");
         assert!(detail.contains("female"));

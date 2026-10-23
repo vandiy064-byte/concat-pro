@@ -443,7 +443,7 @@ mod tests {
             .expect("saves with Vietnamese name");
         assert_eq!(session.settings().name, vi_name);
 
-        let saved_json = std::fs::read_to_string(scratch.join("concat.json")).expect("reads");
+        let saved_json = std::fs::read_to_string(info.path.join("concat.json")).expect("reads");
         let parsed: serde_json::Value = serde_json::from_str(&saved_json).expect("valid json");
         assert_eq!(parsed["name"], vi_name);
 
