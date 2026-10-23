@@ -79,12 +79,12 @@ export global Dark {
     // separating a pane from the ground; without one the value step has to do
     // all of it, and a darker ladder leaves the panes reading as holes in the
     // window rather than as surfaces on it.
-    out property <color> panel: #212123;
-    out property <color> raised: #2b2b2e;
-    out property <color> well: #19191b;
-    out property <color> field: #323235;
-    out property <color> field-hover: #3b3b3e;
-    out property <color> field-active: #46464a;
+    out property <color> panel: #151824;
+    out property <color> raised: #1d2130;
+    out property <color> well: #10131d;
+    out property <color> field: #252a3d;
+    out property <color> field-hover: #2f354c;
+    out property <color> field-active: #3b4360;
 
     // the launch screen's own ladder — a deeper cut of the one above
     //
@@ -100,16 +100,16 @@ export global Dark {
     // reads: `launch-well` is sunken under the card, `launch-raised` is the
     // lift a hover gives, `launch-field` is a chip that is the answer. Only
     // the whole ladder has moved down.
-    out property <color> launch-page: #0d0a1a;
-    out property <color> launch-panel: #1b142f;
-    out property <color> launch-well: #140e24;
-    out property <color> launch-raised: #291d47;
-    out property <color> launch-field: #342459;
-    out property <color> launch-field-active: #432e73;
+    out property <color> launch-page: #090b10;
+    out property <color> launch-panel: #121520;
+    out property <color> launch-well: #0c0e16;
+    out property <color> launch-raised: #1a1e2e;
+    out property <color> launch-field: #23283c;
+    out property <color> launch-field-active: #323955;
 
-    // hairlines — white-alpha, with subtle anime twilight glow on active lines
-    out property <color> line: #ffffff22;
-    out property <color> line-strong: #ff75c355;
+    // hairlines — white-alpha, with subtle neon violet glow on active lines
+    out property <color> line: #ffffff1f;
+    out property <color> line-strong: #8b5cf666;
 
     // text
     out property <color> fg: #f5f5f7;
@@ -136,12 +136,12 @@ export global Dark {
     // The same order as `light.slint` and as `accent-names` in theme.slint,
     // which is where each one's name lives.
     out property <[Accent]> accents: [
-        { accent: #cbf53f, hover: #d9ff63, soft: #cbf53f33, on: #15220a },   // lime
-        { accent: #5fb8ff, hover: #82c9ff, soft: #5fb8ff33, on: #061c33 },   // sky
-        { accent: #b394ff, hover: #c6b0ff, soft: #b394ff33, on: #1d0f3d },   // violet
-        { accent: #ff6fa3, hover: #ff8fb8, soft: #ff6fa333, on: #38091c },   // rose
-        { accent: #ffb340, hover: #ffc46a, soft: #ffb34033, on: #2d1a00 },   // amber
-        { accent: #3fdcc4, hover: #6ae7d4, soft: #3fdcc433, on: #05261f },   // mint
+        { accent: #a3e635, hover: #bef264, soft: #a3e63533, on: #1a2e05 },   // lime
+        { accent: #06b6d4, hover: #22d3ee, soft: #06b6d433, on: #042f2e },   // sky / cyan
+        { accent: #8b5cf6, hover: #a78bfa, soft: #8b5cf633, on: #ffffff },   // violet
+        { accent: #f43f5e, hover: #fb7185, soft: #f43f5e33, on: #ffffff },   // rose
+        { accent: #f59e0b, hover: #fbbf24, soft: #f59e0b33, on: #1f1300 },   // amber
+        { accent: #10b981, hover: #34d399, soft: #10b98133, on: #022c22 },   // mint
     ];
     out property <color> green: #30d158;
     out property <color> on-green: #06210f;
@@ -214,28 +214,25 @@ export global Dark {
     // still reads as a well cut into the pane, and a clip's own dark ground
     // now sits *on* something rather than floating in a hole. Both stay well
     // under `panel`, or the empty stretches would read as content.
-    out property <color> lane: #1a1a1c;
-    out property <color> lane-alt: #1e1e20;
+    out property <color> lane: #10131d;
+    out property <color> lane-alt: #131622;
     // The ruler is its own surface, not the first row of the stack: a step
     // under the darker lane, so the strip carrying the timestamps reads as
     // the floor of the pane and the banding starts below it. It followed
     // `raised` before, which put it above the panel and made it the brightest
     // thing in the pane — the opposite of what a ruler should be.
-    out property <color> ruler: #171719;
+    out property <color> ruler: #0c0e16;
     /// The vertical rules. 6% white was set against a lane that was still a
     /// dark grey, and all but vanished when the lanes went black — a grid that
     /// costs elements and reads as nothing. 14% clears both of the tones the
     /// lanes now carry while staying under `line-strong`, so the rules place a
     /// clip without competing with it.
-    out property <color> grid: #ffffff24;
-    // Lime: the palette's second accent, as a colour of its own rather than
-    // a read of the accent, so a change of accent leaves the playhead where the
-    // eye learnt to find it. Settings > Appearance can put any colour in its
-    // place (theme.slint, `playhead-custom`).
-    out property <color> playhead: #cbf53f;
+    out property <color> grid: #ffffff1c;
+    // Luminous electric cyan playhead for high-precision contrast on dark tracks
+    out property <color> playhead: #06b6d4;
     // Drawn on the audio clip's own dark ground, so it is a light wash of the
     // kind's hue rather than the vivid mark itself.
-    out property <color> wave: #a7f0c2b3;      // 0.7 alpha
+    out property <color> wave: #38bdf8d9;
     // The same wash in the video's blue, for the sound band under a
     // video's frames: the band is the video's, not a sound clip's.
     out property <color> wave-video: #a9c8f5b3; // 0.7 alpha
@@ -303,6 +300,6 @@ export global Dark {
 
     // window ground the panes float on — a shade under the darkest panel so
     // the gutters read as gaps and not as seams
-    out property <color> page: #151517;
-    out property <color> page-fg-muted: #a1a1a6;
+    out property <color> page: #090b10;
+    out property <color> page-fg-muted: #94a3b8;
 }

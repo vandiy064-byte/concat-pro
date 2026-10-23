@@ -306,26 +306,33 @@ export component TitleBar inherits Rectangle {
             padding-left: 4px;
 
             export-button := Rectangle {
-                width: label.width + icon.width + 26px;
-                height: 24px;
-                border-radius: Theme.r-sm;
-                background: export-touch.has-hover ? Theme.accent-hover : Theme.accent;
+                width: label.width + icon.width + 28px;
+                height: 26px;
+                border-radius: self.height / 2;
+                background: export-touch.has-hover
+                    ? @linear-gradient(135deg, #a855f7 0%, #22d3ee 100%)
+                    : @linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%);
+                border-width: 1px;
+                border-color: export-touch.has-hover ? #c084fc : #a855f766;
 
-                animate background { duration: 100ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+                animate background, border-color {
+                    duration: 120ms;
+                    easing: cubic-bezier(0.4, 0, 0.2, 1);
+                }
 
                 icon := Icon {
-                    x: 9px;
+                    x: 10px;
                     y: (parent.height - self.height) / 2;
                     glyph: Glyph.export;
-                    size: 12px;
-                    tint: Theme.on-accent;
+                    size: 13px;
+                    tint: #ffffff;
                 }
 
                 label := Text {
-                    x: icon.x + icon.width + 5px;
+                    x: icon.x + icon.width + 6px;
                     y: (parent.height - self.height) / 2;
                     text: I18n.t("common.export");
-                    color: Theme.on-accent;
+                    color: #ffffff;
                     font-size: Theme.fs;
                     font-weight: Theme.weight-title;
                 }

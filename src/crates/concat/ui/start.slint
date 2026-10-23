@@ -741,10 +741,14 @@ component CreateTile inherits Pressable {
 
     label: root.title;
     background: root.primary
-        ? (root.lit && !root.down ? Theme.accent-hover : Theme.accent)
+        ? (root.lit && !root.down
+            ? @linear-gradient(135deg, #a78bfa 0%, #38bdf8 100%)
+            : @linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%))
         : (root.lit ? Theme.launch-raised : Theme.launch-panel);
-    border-width: root.primary ? 0px : 1px;
-    border-color: root.lit ? Theme.line-strong : Theme.line;
+    border-width: 1px;
+    border-color: root.primary
+        ? (root.lit ? #c084fccc : #8b5cf666)
+        : (root.lit ? Theme.line-strong : Theme.line);
     opacity: root.enabled ? 1.0 : 0.45;
 
     animate background, border-color { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
@@ -907,9 +911,9 @@ component PosterCard inherits Pressable {
     deleted => { root.forgotten(); }
     background: root.lit ? Theme.launch-raised : Theme.launch-panel;
     border-width: 1px;
-    border-color: root.lit ? Theme.line-strong : Theme.line;
+    border-color: root.lit ? #8b5cf688 : Theme.line;
 
-    animate background, border-color { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    animate background, border-color { duration: 150ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
 
     poster := Rectangle {
         x: root.inset;
@@ -2107,17 +2111,17 @@ export component StartScreen inherits Rectangle {
 
     property <bool> narrow: root.phone || root.width < 680px;
 
-    background: @linear-gradient(135deg, #0d0a1a 0%, #17112e 40%, #25143d 75%, #34184a 100%);
+    background: @linear-gradient(135deg, #090b10 0%, #0e111a 35%, #141724 70%, #1a152e 100%);
     clip: true;
 
-    // Makoto Shinkai Dreamy Twilight Ambient Glows
+    // Ambient Luminous Neon Orbs
     Rectangle {
         x: root.width - self.width + 100px;
         y: -120px;
         width: 650px;
         height: 650px;
         border-radius: 325px;
-        background: @radial-gradient(circle, #ff6fa322 0%, #b394ff14 50%, transparent 100%);
+        background: @radial-gradient(circle, #8b5cf626 0%, #6366f112 50%, transparent 100%);
     }
     Rectangle {
         x: -120px;
@@ -2125,7 +2129,7 @@ export component StartScreen inherits Rectangle {
         width: 550px;
         height: 550px;
         border-radius: 275px;
-        background: @radial-gradient(circle, #ffb34015 0%, #b394ff0d 50%, transparent 100%);
+        background: @radial-gradient(circle, #06b6d418 0%, #8b5cf60a 50%, transparent 100%);
     }
 
     if !root.narrow: WideHome {
