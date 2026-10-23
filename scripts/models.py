@@ -37,6 +37,8 @@ CRATES = ROOT / "src" / "crates"
 
 # The repository the releases and packages are published on.
 REPO = os.environ.get("GITHUB_REPOSITORY", "vandiy064-byte/concat-pro")
+# The repository the models mirror lives on (jub0t/Concat).
+MODELS_REPO = "jub0t/Concat"
 HOST_MODELS = CRATES / "concat-host" / "src" / "models.rs"
 
 # Where each family's table lives in the engine, for --check.
@@ -110,8 +112,8 @@ def hf_mirror(url: str) -> str | None:
     return None
 
 
-def asset_url(release: str, file: str) -> str:
-    return f"https://github.com/{REPO}/releases/download/{release}/{file}"
+def asset_url(release: str, file: str, repo: str = REPO) -> str:
+    return f"https://github.com/{repo}/releases/download/{release}/{file}"
 
 
 def engine_id(model: dict) -> str:
@@ -186,8 +188,8 @@ def check() -> int:
     source = HOST_MODELS.read_text(encoding="utf-8") if HOST_MODELS.exists() else ""
     if f'pub const RELEASE: &str = "{release}";' not in source:
         bad(f"{HOST_MODELS.relative_to(ROOT)} does not name the release {release!r}")
-    if f'"{REPO}"' not in source:
-        bad(f"{HOST_MODELS.relative_to(ROOT)} does not name the repository {REPO!r}")
+    if f'"{MODELS_REPO}"' not in source:
+        bad(f"{HOST_MODELS.relative_to(ROOT)} does not name the repository {MODELS_REPO!r}")
 
     # Every model this table carries must be one the engine offers, with the
     # same digest: the table is what the mirror is filled from, the engine's
@@ -356,7 +358,7 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
             "bytes": model["bytes"],
             "sha256": model["sha256"],
             "licence": model["licence"],
-            "url": asset_url(release, model["file"]),
+            "url": asset_url(release, model["file"], repo=MODELS_REPO),
             "upstream": model["upstream"],
             # Every place the file can be fetched from, best first: the
             # app's own order, for anything that reads this instead of the
@@ -364,7 +366,7 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
             "sources": [
                 url
                 for url in [
-                    asset_url(release, model["file"]),
+                    asset_url(release, model["file"], repo=MODELS_REPO),
                     model["upstream"],
                     hf_mirror(model["upstream"]),
                 ]
