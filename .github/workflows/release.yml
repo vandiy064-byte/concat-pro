@@ -105,19 +105,9 @@ jobs:
       ref: ${{ needs.check.outputs.tag }}
     secrets: inherit
 
-  # `sign` is the one thing that puts the repository's Android key into a
-  # run; a pull request's build of mobile.yml never gets it.
-  phones:
-    needs: [check, engine]
-    uses: ./.github/workflows/mobile.yml
-    with:
-      ref: ${{ needs.check.outputs.tag }}
-      sign: true
-    secrets: inherit
-
   publish:
     name: Publish release
-    needs: [check, build, phones]
+    needs: [check, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
