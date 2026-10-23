@@ -36,7 +36,7 @@ class TestReleasePipeline(unittest.TestCase):
         try:
             res = subprocess.run(
                 ["python", str(ROOT / "scripts" / "models.py"), "release-manifest",
-                 "--version", "2.0.11", "--tag", "v2.0.11", "--out", str(out_file)],
+                 "--version", "2.0.12", "--tag", "v2.0.12", "--out", str(out_file)],
                 capture_output=True,
                 text=True,
                 cwd=str(ROOT),
@@ -47,16 +47,16 @@ class TestReleasePipeline(unittest.TestCase):
             with open(out_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            self.assertEqual(data["version"], "2.0.11")
-            self.assertEqual(data["tag"], "v2.0.11")
+            self.assertEqual(data["version"], "2.0.12")
+            self.assertEqual(data["tag"], "v2.0.12")
             self.assertEqual(data["product"], "Concat")
             self.assertIn("binaries", data)
             self.assertIn("windows", data["binaries"])
             self.assertIn("x86_64", data["binaries"]["windows"])
 
             win_setup = data["binaries"]["windows"]["x86_64"]["setup"]
-            self.assertEqual(win_setup["file"], "Concat-2.0.11-windows-x86_64-setup.exe")
-            expected_url = "https://github.com/vandiy064-byte/concat-pro/releases/download/v2.0.11/Concat-2.0.11-windows-x86_64-setup.exe"
+            self.assertEqual(win_setup["file"], "Concat-2.0.12-windows-x86_64-setup.exe")
+            expected_url = "https://github.com/vandiy064-byte/concat-pro/releases/download/v2.0.12/Concat-2.0.12-windows-x86_64-setup.exe"
             self.assertEqual(win_setup["url"], expected_url)
 
         finally:
@@ -65,7 +65,7 @@ class TestReleasePipeline(unittest.TestCase):
 
     def test_cargo_toml_version(self):
         cargo_toml = (ROOT / "src" / "Cargo.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "2.0.11"', cargo_toml, "Cargo.toml version should be 2.0.11")
+        self.assertIn('version = "2.0.12"', cargo_toml, "Cargo.toml version should be 2.0.12")
 
 if __name__ == "__main__":
     unittest.main()

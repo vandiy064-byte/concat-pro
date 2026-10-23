@@ -407,4 +407,44 @@ mod tests {
         assert!(opened.is_err(), "a half document is not an empty project");
         let _ = std::fs::remove_dir_all(&scratch);
     }
+
+    #[test]
+    fn renaming_project_updates_document_settings_and_persists_to_disk() {
+        let scratch =
+            std::env::temp_dir().join(format!("concat-rename-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let info = projects::create(
+            &scratch.to_string_lossy(),
+            "Initial Project",
+            1920,
+            1080,
+            30,
+            1,
+        )
+        .expect("creates");
+        let mut session = Session::open_info(&info).expect("opens project session");
+        assert_eq!(session.settings().name, "Initial Project");
+
+        // 1. Whitespace or empty string is ignored
+        let (_, doc1) = session.prepare_save(Some("   "));
+        assert_eq!(session.settings().name, "Initial Project");
+        assert_eq!(doc1["name"], "Initial Project");
+
+        // 2. Normal renaming updates settings and document
+        let (_, doc2) = session.prepare_save(Some("My New Project"));
+        assert_eq!(session.settings().name, "My New Project");
+        assert_eq!(doc2["name"], "My New Project");
+
+        // 3. UTF-8 Vietnamese name round-trips correctly
+        let vi_name = "Dự án Concat Tiếng Việt";
+        session.save(Some(vi_name)).expect("saves with Vietnamese name");
+        assert_eq!(session.settings().name, vi_name);
+
+        let saved_json = std::fs::read_to_string(scratch.join("concat.json")).expect("reads");
+        let parsed: serde_json::Value = serde_json::from_str(&saved_json).expect("valid json");
+        assert_eq!(parsed["name"], vi_name);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }

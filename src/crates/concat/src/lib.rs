@@ -1701,6 +1701,9 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     app.on_project_apply(on_window!(|state| {
         state.handle(Msg::Project(ProjectMsg::Apply));
     }));
+    app.on_rename_project(on_window!(|state, name: SharedString| {
+        state.rename_project(name.as_str());
+    }));
 
     app.on_confirm_accepted(on_window!(|state| {
         state.confirm_accepted();

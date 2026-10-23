@@ -2846,6 +2846,21 @@ impl Studio {
         );
     }
 
+    /// Renames the current project. If the name is non-empty and different,
+    /// updates the session document, writes it to disk, and notifies the user.
+    pub fn rename_project(&mut self, new_name: &str) {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() || trimmed == self.project_name {
+            return;
+        }
+        self.project_name = trimmed.to_owned();
+        if let Some(session) = self.session.as_mut() {
+            session.prepare_save(Some(trimmed));
+        }
+        self.save(false);
+        self.notify(&tf("project.renameSuccess", &[&trimmed]), false);
+    }
+
     /// The audible clip set, handed to playback whenever the edit changes.
     /// Not while a library file has the speakers: the timeline's sound is
     /// handed back when it lets them go.
@@ -12568,5 +12583,29 @@ mod tests {
                 "one undo puts {id} back"
             );
         }
+    }
+
+    #[test]
+    fn project_rename_validation() {
+        let current = "Untitled project 1";
+        let validate_and_trim = |name: &str, current: &str| -> Option<String> {
+            let trimmed = name.trim();
+            if trimmed.is_empty() || trimmed == current {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        };
+
+        assert_eq!(validate_and_trim("   ", current), None);
+        assert_eq!(validate_and_trim("Untitled project 1", current), None);
+        assert_eq!(
+            validate_and_trim("  My Concat Project  ", current),
+            Some("My Concat Project".to_string())
+        );
+        assert_eq!(
+            validate_and_trim("Dự án Concat Tiếng Việt", current),
+            Some("Dự án Concat Tiếng Việt".to_string())
+        );
     }
 }

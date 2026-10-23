@@ -5,6 +5,8 @@ import { I18n } from "i18n.slint";
 import { Theme } from "theme/theme.slint";
 import { Glyph, Icon } from "icons.slint";
 import { AddPaneButton, PaneKind } from "workspace/pane-switcher.slint";
+import { Focus } from "util.slint";
+import { Tip } from "primitives/tooltip.slint";
 
 // The custom title bar.
 //
@@ -148,6 +150,30 @@ export component TitleBar inherits Rectangle {
     /// A view was picked from the add-panel list.
     callback add-pane(kind: PaneKind);
     callback export-clicked();
+    callback rename-project(string);
+
+    property <bool> editing-name: false;
+    property <string> name-draft: "";
+
+    function start-rename() {
+        root.name-draft = root.project-name;
+        root.editing-name = true;
+    }
+
+    function commit-rename(new-name: string) {
+        if (!root.editing-name) {
+            return;
+        }
+        root.editing-name = false;
+        if (new-name != "" && new-name != root.project-name) {
+            root.rename-project(new-name);
+        }
+    }
+
+    function cancel-rename() {
+        root.editing-name = false;
+        root.name-draft = "";
+    }
 
     height: 32px;
     // The window's ground, not a panel's: the strip is the frame the panes
@@ -344,21 +370,151 @@ export component TitleBar inherits Rectangle {
         height: parent.height;
         spacing: 6px;
 
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: root.project-name;
-                color: Theme.fg-muted;
-                font-size: Theme.fs;
+        if !root.editing-name: name-pill := Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 24px;
+            border-radius: Theme.r-sm;
+            background: name-touch.has-hover ? Theme.field : Colors.transparent;
+            animate background { duration: 100ms; }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: center;
+
+                Text {
+                    vertical-alignment: center;
+                    text: root.project-name;
+                    color: name-touch.has-hover ? Theme.fg : Theme.fg-muted;
+                    font-size: Theme.fs;
+                    font-weight: Theme.weight-title;
+                }
+
+                if name-touch.has-hover: Icon {
+                    y: (parent.height - self.height) / 2;
+                    glyph: Glyph.edit;
+                    size: 11px;
+                    tint: Theme.fg-muted;
+                }
+            }
+
+            Tip {
+                text: I18n.t("project.clickToRename");
+                active: name-touch.has-hover;
+            }
+
+            name-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.start-rename(); }
             }
         }
 
-        VerticalLayout {
+        if !root.editing-name: VerticalLayout {
             alignment: center;
             Text {
                 text: root.status;
                 color: Theme.fg-dim;
                 font-size: Theme.fs-xs;
+            }
+        }
+
+        if root.editing-name: edit-box := Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 24px;
+            border-radius: Theme.r-xs;
+            background: Theme.well;
+            border-width: 1px;
+            border-color: Theme.accent;
+            clip: true;
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 2px;
+                spacing: 4px;
+                alignment: center;
+
+                rename-input := TextInput {
+                    width: Math.max(120px, self.preferred-width);
+                    height: self.preferred-height;
+                    y: (parent.height - self.height) / 2;
+                    text: root.name-draft;
+                    color: Theme.fg;
+                    font-size: Theme.fs;
+                    single-line: true;
+                    selection-background-color: Theme.accent;
+                    selection-foreground-color: Theme.on-accent;
+
+                    init => {
+                        self.focus();
+                        self.select-all();
+                    }
+
+                    changed has-focus => {
+                        if (!self.has-focus && root.editing-name) {
+                            root.commit-rename(self.text);
+                        }
+                    }
+
+                    accepted => {
+                        Focus.release();
+                    }
+
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.cancel-rename();
+                            Focus.release();
+                            return EventResult.accept;
+                        }
+                        return EventResult.reject;
+                    }
+                }
+
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    border-radius: Theme.r-xs;
+                    background: check-touch.has-hover ? Theme.field : Colors.transparent;
+
+                    Icon {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        glyph: Glyph.check;
+                        size: 12px;
+                        tint: Theme.accent;
+                    }
+
+                    check-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.commit-rename(rename-input.text);
+                            Focus.release();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    border-radius: Theme.r-xs;
+                    background: close-touch.has-hover ? Theme.field : Colors.transparent;
+
+                    Icon {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        glyph: Glyph.close;
+                        size: 12px;
+                        tint: Theme.fg-muted;
+                    }
+
+                    close-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.cancel-rename();
+                            Focus.release();
+                        }
+                    }
+                }
             }
         }
     }

@@ -294,6 +294,7 @@ export component App inherits Window {
 
     callback open-settings();
     callback export-clicked();
+    callback rename-project(string);
 
     /// The project sheet, opened from the Details panel.
     in property <ProjectSheetData> project-sheet;
@@ -582,6 +583,7 @@ export component App inherits Window {
                 open-settings => { root.open-settings(); }
                 add-pane(kind) => { Editor.dock-add(kind); }
                 export-clicked => { root.export-clicked(); }
+                rename-project(name) => { root.rename-project(name); }
             }
 
             if root.on-start: StartScreen {
