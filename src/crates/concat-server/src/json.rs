@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(reply["result"]["apiVersion"], concat_api::API_VERSION);
         assert_eq!(
             reply["result"]["capabilities"],
-            serde_json::json!(["events", "json-rpc"]),
+            serde_json::json!(["events", "speech", "transcribe", "json-rpc"]),
             "the transport listening is named"
         );
         let refused = client
