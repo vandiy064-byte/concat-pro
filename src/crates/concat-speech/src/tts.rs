@@ -225,10 +225,7 @@ pub const CHATTERBOX_VOICES: &[(i32, &str, Option<&str>)] = &[
 pub const CHATTERBOX_CLONE: i32 = 2099;
 
 /// The voices VITS offers (including Vietnamese voices), by our own id.
-pub const VITS_VOICES: &[(i32, &str)] = &[
-    (3000, "vf_vivos"),
-    (3001, "vm_vivos"),
-];
+pub const VITS_VOICES: &[(i32, &str)] = &[(3000, "vf_vivos"), (3001, "vm_vivos")];
 
 /// The default VITS voice.
 pub const DEFAULT_VITS_VOICE: i32 = 3000;

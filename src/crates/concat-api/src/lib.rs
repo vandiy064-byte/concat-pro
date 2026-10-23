@@ -51,18 +51,17 @@ use concat_host::templates::{self, SlotFill};
 use concat_host::{ProjectInfo, Session, Titles, lock, media, projects};
 use concat_project::Command;
 use concat_project::model::VideoSettings;
-use concat_speech::{Speech, Transcriber};
 use concat_speech::transcribe::TranscribeRequest;
 use concat_speech::tts::{Family, Reference, SpeakRequest, family_of, voice_family};
+use concat_speech::{Speech, Transcriber};
 
 pub use message::{
     API_VERSION, ApiError, CapcutExportResult, CaptionSegment, CaptionUpdateEntry,
     CaptionsExportResult, CaptionsKaraokeResult, CaptionsOcrResult, CaptionsResultInfo,
     CaptionsUpdateResult, Dirs, Done, ErrorCode, Event, ExportSpec, Fill, JobState, JobStatus,
-    PackageInfo, ParamInfo, Picture, ReferenceSpec, Reply, Request, Response,
-    SavedVoiceSummary, ScriptToVideoResult, SilenceRemoveResult, SmartReframeResult,
-    SpeechModelSummary, SpeechResultInfo, SpeechVoicesInfo, Started, VersionInfo,
-    VoiceSummary, Written,
+    PackageInfo, ParamInfo, Picture, ReferenceSpec, Reply, Request, Response, SavedVoiceSummary,
+    ScriptToVideoResult, SilenceRemoveResult, SmartReframeResult, SpeechModelSummary,
+    SpeechResultInfo, SpeechVoicesInfo, Started, VersionInfo, VoiceSummary, Written,
 };
 
 /// The export sheet's middle quality, and what an export gets when the
@@ -535,9 +534,9 @@ impl Api {
                 track_id.as_deref(),
                 output.as_deref(),
             )?)),
-            Request::CaptionsUpdate { path, captions } => {
-                Ok(Reply::CaptionsUpdated(self.captions_update(&path, captions)?))
-            }
+            Request::CaptionsUpdate { path, captions } => Ok(Reply::CaptionsUpdated(
+                self.captions_update(&path, captions)?,
+            )),
             Request::CaptionsOcr {
                 path,
                 clip_id,
@@ -1147,7 +1146,10 @@ impl Api {
                 (m, v)
             }
             (None, None) => {
-                const VIETNAMESE_CHARS: &str = "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ";
+                const VIETNAMESE_CHARS: &str = concat!(
+                    "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ",
+                    "ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ",
+                );
                 let is_vietnamese = text.chars().any(|c| VIETNAMESE_CHARS.contains(c));
                 if is_vietnamese {
                     (
@@ -1228,7 +1230,9 @@ impl Api {
                 dur,
             )
         } else {
-            return Err(ApiError::invalid("either clipId or mediaPath must be provided"));
+            return Err(ApiError::invalid(
+                "either clipId or mediaPath must be provided",
+            ));
         };
 
         let model = model_id.unwrap_or("base").to_owned();
@@ -1550,11 +1554,9 @@ impl Api {
     ) -> Result<CapcutExportResult, ApiError> {
         let name = draft_name.unwrap_or("Concat_To_CapCut");
         let local_appdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let target_dir = output_folder
-            .map(|s| s.to_owned())
-            .unwrap_or_else(|| {
-                format!("{local_appdata}/CapCut/User Data/Projects/com.lveditor.draft/{name}")
-            });
+        let target_dir = output_folder.map(|s| s.to_owned()).unwrap_or_else(|| {
+            format!("{local_appdata}/CapCut/User Data/Projects/com.lveditor.draft/{name}")
+        });
         let _ = std::fs::create_dir_all(&target_dir);
 
         Ok(CapcutExportResult {

@@ -625,7 +625,8 @@ mod tests {
         let req: TranscribeRequest = serde_json::from_str(json).expect("deserialize with language");
         assert_eq!(req.language.as_deref(), Some("vi"));
 
-        let json_default = r#"{"path":"test.mp4","sourceStart":0.0,"window":10.0,"modelId":"base"}"#;
+        let json_default =
+            r#"{"path":"test.mp4","sourceStart":0.0,"window":10.0,"modelId":"base"}"#;
         let req_default: TranscribeRequest =
             serde_json::from_str(json_default).expect("deserialize without language");
         assert_eq!(req_default.language, None);

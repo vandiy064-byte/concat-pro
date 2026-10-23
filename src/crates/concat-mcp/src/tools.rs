@@ -1027,7 +1027,10 @@ fn captions_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<
         .ok_or_else(|| invalid("missing field `path`"))?
         .to_owned();
 
-    let clip_id = fields.get("clipId").and_then(Value::as_str).map(String::from);
+    let clip_id = fields
+        .get("clipId")
+        .and_then(Value::as_str)
+        .map(String::from);
     let apply_to_timeline = fields
         .remove("applyToTimeline")
         .and_then(|v| v.as_bool())
@@ -1055,10 +1058,18 @@ fn captions_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<
             .pointer("/activeTimeline/clips")
             .and_then(Value::as_array)
             .and_then(|clips| {
-                clips.iter().find(|c| c.get("id").and_then(Value::as_str) == Some(cid))
+                clips
+                    .iter()
+                    .find(|c| c.get("id").and_then(Value::as_str) == Some(cid))
             });
-        let start = clip_info.and_then(|c| c.get("start")).and_then(Value::as_f64).unwrap_or(0.0);
-        let speed = clip_info.and_then(|c| c.get("speed")).and_then(Value::as_f64).unwrap_or(1.0);
+        let start = clip_info
+            .and_then(|c| c.get("start"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let speed = clip_info
+            .and_then(|c| c.get("speed"))
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
         (start, speed)
     } else {
         (0.0, 1.0)
@@ -1081,8 +1092,15 @@ fn captions_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<
     let mut commands = Vec::with_capacity(segments.len());
     for segment in &segments {
         let seg_start = segment.get("start").and_then(Value::as_f64).unwrap_or(0.0);
-        let seg_end = segment.get("end").and_then(Value::as_f64).unwrap_or(seg_start + 1.0);
-        let text = segment.get("text").and_then(Value::as_str).unwrap_or("").trim();
+        let seg_end = segment
+            .get("end")
+            .and_then(Value::as_f64)
+            .unwrap_or(seg_start + 1.0);
+        let text = segment
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
         if text.is_empty() {
             continue;
         }
@@ -1140,7 +1158,9 @@ fn speech_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<Ou
         .remove("placeOnTimeline")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let track_id = fields.remove("trackId").and_then(|v| v.as_str().map(String::from));
+    let track_id = fields
+        .remove("trackId")
+        .and_then(|v| v.as_str().map(String::from));
     let start = fields.remove("start").and_then(|v| v.as_f64());
 
     // 1. Synthesize speech via speech.generate
@@ -1150,7 +1170,10 @@ fn speech_generate(mut arguments: Value, backend: &mut dyn Backend) -> Result<Ou
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::failed("speech synthesis did not produce a file path"))?
         .to_owned();
-    let duration = synth_result.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
+    let duration = synth_result
+        .get("duration")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
 
     if !place_on_timeline {
         return Ok(Outcome::json(json!({

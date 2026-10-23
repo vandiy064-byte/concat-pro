@@ -218,13 +218,20 @@ impl ExportPane {
                         let srt_path = std::path::Path::new(&written).with_extension("srt");
                         let srt_text = concat_project::srt::write(&cues);
                         if let Err(error) = std::fs::write(&srt_path, &srt_text) {
-                            log::warn!("export: could not write srt {}: {error}", srt_path.display());
+                            log::warn!(
+                                "export: could not write srt {}: {error}",
+                                srt_path.display()
+                            );
                         } else {
                             let srt_name = srt_path
                                 .file_name()
                                 .map(|f| f.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "subtitles.srt".to_string());
-                            log::info!("export: wrote {} subtitle cue(s) to {}", cues.len(), srt_path.display());
+                            log::info!(
+                                "export: wrote {} subtitle cue(s) to {}",
+                                cues.len(),
+                                srt_path.display()
+                            );
                             self.written_srt = srt_name.clone();
                             studio.notify(&tf("export.exportedWithSubtitles", &[&srt_name]), false);
                         }
@@ -681,12 +688,25 @@ impl ExportPane {
         let srt_path = std::path::Path::new(&srt_folder).join(&srt_name);
         let srt_text = concat_project::srt::write(&cues);
         if let Err(error) = std::fs::write(&srt_path, &srt_text) {
-            log::warn!("export: could not write srt {}: {error}", srt_path.display());
-            studio.notify(&i18n::tf("captions.couldNotWriteSubtitles", &[&error.to_string()]), true);
+            log::warn!(
+                "export: could not write srt {}: {error}",
+                srt_path.display()
+            );
+            studio.notify(
+                &i18n::tf("captions.couldNotWriteSubtitles", &[&error.to_string()]),
+                true,
+            );
         } else {
-            log::info!("export: wrote {} cues to {}", cues.len(), srt_path.display());
+            log::info!(
+                "export: wrote {} cues to {}",
+                cues.len(),
+                srt_path.display()
+            );
             self.written_srt = srt_name.clone();
-            studio.notify(&i18n::tf("export.exportedWithSubtitles", &[&srt_name]), false);
+            studio.notify(
+                &i18n::tf("export.exportedWithSubtitles", &[&srt_name]),
+                false,
+            );
         }
     }
 }

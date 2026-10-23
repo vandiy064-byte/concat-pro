@@ -983,10 +983,10 @@ impl SpeechPane {
             }
             VoiceChoice::Saved(id) => {
                 if self.sample_voice().is_none() {
-                    match models
-                        .iter()
-                        .position(|model| family_of(&model.id) != Family::Kokoro && family_of(&model.id) != Family::Vits)
-                    {
+                    match models.iter().position(|model| {
+                        family_of(&model.id) != Family::Kokoro
+                            && family_of(&model.id) != Family::Vits
+                    }) {
                         Some(row) => pick_model(self, row),
                         None => {
                             self.message = t("speech.needsCloningModel");

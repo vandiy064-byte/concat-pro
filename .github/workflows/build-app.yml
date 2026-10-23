@@ -75,6 +75,9 @@ on:
         description: The .pfx's password
         required: false
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   # The prebuilt dependencies - BtbN's FFmpeg 8.1 (GPL, shared, one per
@@ -112,6 +115,8 @@ env:
 jobs:
   app:
     name: ${{ matrix.platform }}-${{ matrix.arch }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -1195,7 +1200,8 @@ jobs:
           name: Concat v${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
+          body: "Concat v${{ steps.version.outputs.version }} release build."
           files: stage/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

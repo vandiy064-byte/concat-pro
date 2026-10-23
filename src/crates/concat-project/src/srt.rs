@@ -264,7 +264,9 @@ pub fn title_lanes(timeline: &Timeline) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cue, busiest_title_lane, parse, title_cues, title_lanes, write};
+    use super::{
+        Cue, busiest_title_lane, parse, title_cues, title_lanes, write, write_txt, write_vtt,
+    };
     use crate::commands::Command;
     use crate::editor::Editor;
     use crate::model::TextStyle;
@@ -445,10 +447,7 @@ mod tests {
 
     #[test]
     fn vtt_and_txt_formats_render_properly() {
-        let cues = vec![
-            cue(1.0, 2.5, "Xin chào"),
-            cue(3.0, 4.5, "Tạm biệt"),
-        ];
+        let cues = vec![cue(1.0, 2.5, "Xin chào"), cue(3.0, 4.5, "Tạm biệt")];
         let vtt = write_vtt(&cues);
         assert!(vtt.starts_with("WEBVTT\n\n"));
         assert!(vtt.contains("00:00:01.000 --> 00:00:02.500\nXin chào"));

@@ -4,9 +4,7 @@
 //! Tests for Vietnamese speech & transcription integration.
 
 use concat_speech::transcribe::TranscribeRequest;
-use concat_speech::tts::{
-    DEFAULT_VITS_VOICE, Family, VITS_VOICES, family_of, voice_family,
-};
+use concat_speech::tts::{DEFAULT_VITS_VOICE, Family, VITS_VOICES, family_of, voice_family};
 
 #[test]
 fn test_vits_vietnamese_model_family_classification() {
