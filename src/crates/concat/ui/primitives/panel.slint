@@ -256,9 +256,9 @@ export component IconButton inherits Rectangle {
     // tint behind eight of them turns a tray into a row of green slabs. The
     // glyph carries the state; the chip only has to sit back far enough to be
     // seen behind it.
-    property <brush> tint: root.checked ? Theme.accent
+    property <brush> tint: root.accent ? #ffffff
+        : root.checked ? #c084fc
         : (root.lit && root.danger) ? Theme.danger
-        : root.accent ? (root.lit ? Theme.accent-hover : Theme.accent)
         : root.lit ? Theme.fg-hot
         : root.idle;
     property <length> side: 26px;
@@ -298,17 +298,25 @@ export component IconButton inherits Rectangle {
         y: (root.height - root.side) / 2;
         width: root.width;
         height: root.side;
-        border-radius: Theme.r-sm;
+        border-radius: root.accent ? (self.height / 2) : Theme.r-sm;
+        border-width: (root.accent || root.checked) ? 1px : 0px;
+        border-color: root.accent
+            ? (touch.has-hover ? #c084fc : #a855f780)
+            : root.checked ? #8b5cf699 : Colors.transparent;
         opacity: root.enabled ? 1.0 : 0.4;
-        background: root.checked ? Theme.well
+        background: root.accent
+            ? (touch.has-hover
+                ? @linear-gradient(135deg, #a855f7 0%, #22d3ee 100%)
+                : @linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%))
+            : root.checked
+            ? @linear-gradient(135deg, #8b5cf630 0%, #06b6d418 100%)
             : !root.enabled ? Colors.transparent
             : (touch.has-hover && root.danger) ? Theme.danger-soft
-            : (touch.has-hover && root.accent) ? Theme.accent-soft
             : touch.pressed ? Theme.field-active
             : touch.has-hover ? Theme.field
             : Colors.transparent;
 
-        animate background {
+        animate background, border-color {
             duration: 100ms;
             easing: cubic-bezier(0.4, 0, 0.2, 1);
         }

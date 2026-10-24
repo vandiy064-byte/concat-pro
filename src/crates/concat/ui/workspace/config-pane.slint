@@ -77,16 +77,26 @@ component FactHeading inherits HorizontalLayout {
 
     padding-left: Theme.pad;
     padding-right: Theme.pad;
-    // The air belongs between the groups, not between the lines inside one.
-    padding-top: 12px;
-    padding-bottom: 3px;
+    padding-top: 8px;
+    padding-bottom: 4px;
+    spacing: 6px;
+    alignment: start;
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: #8b5cf6;
+    }
 
     Text {
         text: root.title;
-        color: Theme.fg-dim;
+        color: #c084fc;
         font-size: Theme.fs-sm;
         font-weight: Theme.weight-title;
         letter-spacing: 1px;
+        vertical-alignment: center;
     }
 }
 
@@ -243,7 +253,9 @@ export component ConfigPane inherits Rectangle {
         : ["Video", "Audio", "Effects"];
     /// The same tabs in the interface's language. `tabs` stays English,
     /// because the panels are picked by comparing against it.
-    property <[string]> tabs-shown: root.selected.batch-volume ? [I18n.t("common.audio")] : root.is-text ? [I18n.t("common.text")]
+    property <[string]> tabs-shown: root.selected.batch-volume
+        ? [I18n.t("common.audio")]
+        : root.is-text ? [I18n.t("common.text")]
         : root.is-layer ? [I18n.t("configPane.filter")]
         : root.is-shape ? [I18n.t("configPane.vectorImage")]
         : root.is-image ? [I18n.t("common.video"), I18n.t("common.effects")]
@@ -405,28 +417,83 @@ export component ConfigPane inherits Rectangle {
 
             PaneScroll {
                 VerticalLayout {
-                    padding-top: 4px;
-                    // No gap: the rows carry their own height and a spacing on
-                    // top of it opens the table back up.
-                    spacing: 0px;
+                    padding: 8px;
+                    spacing: 10px;
 
-                    FactHeading { title: I18n.t("configPane.project"); }
-                    FactRow { label: I18n.t("common.name"); value: root.project-name; }
-                    FactRow { label: I18n.t("configPane.folder"); value: root.project-folder; }
+                    // Project Info Card
+                    Rectangle {
+                        border-radius: Theme.r;
+                        border-width: 1px;
+                        border-color: #8b5cf62a;
+                        background: @linear-gradient(180deg, #181c2c77 0%, #11142099 100%);
 
-                    // The frame is a timeline's, not the project's: two cuts
-                    // of one edit can be two shapes, and these rows say which
-                    // one they are describing.
-                    FactHeading { title: I18n.t("configPane.timeline"); }
-                    FactRow { label: I18n.t("common.name"); value: root.timeline-name; }
-                    FactRow { label: I18n.t("common.frame"); value: root.project-output; }
-                    FactRow { label: I18n.t("common.rate"); value: root.project-rate; }
-                    FactRow { label: I18n.t("common.duration"); value: root.project-duration; }
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            spacing: 2px;
 
-                    FactHeading { title: I18n.t("configPane.contents"); }
-                    FactRow { label: I18n.t("common.media"); value: "\{root.count-media}"; }
-                    FactRow { label: I18n.t("configPane.tracks"); value: "\{root.count-tracks}"; }
-                    FactRow { label: I18n.t("configPane.clips"); value: "\{root.count-clips}"; }
+                            FactHeading { title: I18n.t("configPane.project"); }
+                            FactRow { label: I18n.t("common.name"); value: root.project-name; }
+                            FactRow {
+                                label: I18n.t("configPane.folder");
+                                value: root.project-folder;
+                            }
+                        }
+                    }
+
+                    // Timeline Info Card
+                    Rectangle {
+                        border-radius: Theme.r;
+                        border-width: 1px;
+                        border-color: #8b5cf62a;
+                        background: @linear-gradient(180deg, #181c2c77 0%, #11142099 100%);
+
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            spacing: 2px;
+
+                            FactHeading { title: I18n.t("configPane.timeline"); }
+                            FactRow { label: I18n.t("common.name"); value: root.timeline-name; }
+                            FactRow {
+                                label: I18n.t("common.frame");
+                                value: root.project-output;
+                            }
+                            FactRow { label: I18n.t("common.rate"); value: root.project-rate; }
+                            FactRow {
+                                label: I18n.t("common.duration");
+                                value: root.project-duration;
+                            }
+                        }
+                    }
+
+                    // Contents Info Card
+                    Rectangle {
+                        border-radius: Theme.r;
+                        border-width: 1px;
+                        border-color: #8b5cf62a;
+                        background: @linear-gradient(180deg, #181c2c77 0%, #11142099 100%);
+
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            spacing: 2px;
+
+                            FactHeading { title: I18n.t("configPane.contents"); }
+                            FactRow {
+                                label: I18n.t("common.media");
+                                value: "\{root.count-media}";
+                            }
+                            FactRow {
+                                label: I18n.t("configPane.tracks");
+                                value: "\{root.count-tracks}";
+                            }
+                            FactRow {
+                                label: I18n.t("configPane.clips");
+                                value: "\{root.count-clips}";
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -447,21 +514,23 @@ export component ConfigPane inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 width: modify-label.width + 30px;
                 height: 30px;
-                // The control radius, not the pane's. It was the roundest of
-                // the named radii on the theory that the one button in the
-                // panel should stand apart from the fields; at 30px tall that
-                // is most of the way to a pill, and it stood apart from every
-                // other button in the window instead.
-                border-radius: Theme.r;
-                background: modify-touch.has-hover ? Theme.field-hover : Theme.field;
+                border-radius: self.height / 2;
+                border-width: 1px;
+                border-color: modify-touch.has-hover ? #c084fc : #8b5cf680;
+                background: modify-touch.has-hover
+                    ? @linear-gradient(135deg, #a855f7 0%, #22d3ee 100%)
+                    : @linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%);
 
-                animate background { duration: 100ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+                animate background, border-color {
+                    duration: 120ms;
+                    easing: cubic-bezier(0.4, 0, 0.2, 1);
+                }
 
                 modify-label := Text {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     text: I18n.t("configPane.modify");
-                    color: Theme.fg;
+                    color: #ffffff;
                     font-size: Theme.fs;
                     font-weight: Theme.weight-title;
                 }
@@ -617,7 +686,8 @@ export component ConfigPane inherits Rectangle {
                         // the tab, the selection or a jump moved the section
                         // under it. So it is set again whenever the section
                         // shown changes. https://github.com/jub0t/Concat/issues/250
-                        property <int> shown: Math.max(0, Math.min(root.section, root.sections.length - 1));
+                        property <int> shown: Math.max(0,
+                            Math.min(root.section, root.sections.length - 1));
                         current: self.shown;
                         changed shown => { self.current = self.shown; }
                         changed(index) => { root.pick-section(index); }

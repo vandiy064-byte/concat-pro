@@ -833,7 +833,8 @@ export component PreviewPane inherits Rectangle {
             VerticalLayout {
                 alignment: center;
                 Text {
-                    text: "\{root.output-width} × \{root.output-height} · \{Math.round(root.frame-rate)} fps";
+                    text: "\{root.output-width} × \{root.output-height} "
+                        + "· \{Math.round(root.frame-rate)} fps";
                     color: Theme.fg-dim;
                     font-family: Theme.font-technical;
                     font-size: Theme.fs;
@@ -1020,22 +1021,59 @@ export component PreviewPane inherits Rectangle {
                 // reports what is actually under the playhead.
                 if !root.has-picture: VerticalLayout {
                     alignment: center;
-                    spacing: 10px;
+                    spacing: 12px;
 
                     HorizontalLayout {
                         alignment: center;
-                        Icon {
-                            glyph: Glyph.film;
-                            size: 22px;
-                            tint: Theme.fg-dim;
+                        monitor-badge := Rectangle {
+                            width: 60px;
+                            height: 60px;
+                            border-radius: 30px;
+                            border-width: 1px;
+                            border-color: #8b5cf666;
+                            background: @linear-gradient(135deg, #8b5cf628 0%, #06b6d41a 100%);
+
+                            Icon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                glyph: Glyph.film;
+                                size: 26px;
+                                tint: #c084fc;
+                            }
                         }
                     }
 
                     Text {
                         text: I18n.t("previewPane.nothingUnderThePlayhead");
-                        color: Theme.fg-dim;
+                        color: #94a3b8;
                         font-size: Theme.fs;
+                        font-weight: Theme.weight-title;
                         horizontal-alignment: center;
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 20px;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #8b5cf640;
+                            background: #8b5cf612;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                alignment: center;
+
+                                Text {
+                                    text: "✦ ULTRA HD PREVIEW ENGINE ✦";
+                                    color: #c084fc;
+                                    font-size: Theme.fs-sm;
+                                    font-weight: Theme.weight-title;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1111,7 +1149,8 @@ export component PreviewPane inherits Rectangle {
                             width: 18px;
                             height: 18px;
                             border-radius: 9px;
-                            background: close-touch.has-hover ? Theme.on-scrim.with-alpha(0.2) : transparent;
+                            background: close-touch.has-hover
+                                ? Theme.on-scrim.with-alpha(0.2) : transparent;
 
                             Icon {
                                 x: (parent.width - self.width) / 2;
@@ -1159,34 +1198,46 @@ export component PreviewPane inherits Rectangle {
                     spacing: 8px;
                     alignment: start;
 
-                    VerticalLayout {
-                        alignment: center;
-                        NumberField {
-                            width: 116px;
-                            value <=> root.shown-frames;
-                            minimum: 0;
-                            maximum: root.playhead-free ? 1000000000 : root.total-frames;
-                            step: 1;
-                            // Scrubbing a timecode should walk frames at the
-                            // speed a hand expects, not fly a hundred at once.
-                            px-per-step: 3px;
-                            format(v) => {
-                                return Fmt.frames-timecode(v / root.frame-rate,
-                                    root.frame-rate);
-                            }
-                            parse(text) => {
-                                return Fmt.parse-frames(text, root.frame-rate);
-                            }
-                            changed(v) => { root.seek(v / root.frame-rate); }
-                        }
-                    }
+                    timecode-hud := Rectangle {
+                        height: 28px;
+                        border-radius: Theme.r-sm;
+                        border-width: 1px;
+                        border-color: #8b5cf633;
+                        background: Theme.well;
 
-                    Text {
-                        text: "/ " + Fmt.frames-timecode(root.duration, root.frame-rate);
-                        color: Theme.fg-dim;
-                        font-family: Theme.font-technical;
-                        font-size: Theme.fs;
-                        vertical-alignment: center;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            NumberField {
+                                width: 116px;
+                                value <=> root.shown-frames;
+                                minimum: 0;
+                                maximum: root.playhead-free ? 1000000000 : root.total-frames;
+                                step: 1;
+                                // Scrubbing a timecode should walk frames at the
+                                // speed a hand expects, not fly a hundred at once.
+                                px-per-step: 3px;
+                                format(v) => {
+                                    return Fmt.frames-timecode(v / root.frame-rate,
+                                        root.frame-rate);
+                                }
+                                parse(text) => {
+                                    return Fmt.parse-frames(text, root.frame-rate);
+                                }
+                                changed(v) => { root.seek(v / root.frame-rate); }
+                            }
+
+                            Text {
+                                text: "/ " + Fmt.frames-timecode(root.duration, root.frame-rate);
+                                color: Theme.fg-dim;
+                                font-family: Theme.font-technical;
+                                font-size: Theme.fs;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
 
@@ -1213,7 +1264,8 @@ export component PreviewPane inherits Rectangle {
                     // the one control that carries a colour.
                     IconButton {
                         glyph: root.playing ? Glyph.pause : Glyph.play;
-                        label: root.playing ? I18n.t("previewPane.pause") : I18n.t("previewPane.play");
+                        label: root.playing
+                            ? I18n.t("previewPane.pause") : I18n.t("previewPane.play");
                         icon-size: 16px;
                         accent: true;
                         clicked => { root.play-toggled(); }
@@ -1259,7 +1311,8 @@ export component PreviewPane inherits Rectangle {
                             snug: true;
                             width: self.natural-width;
                             current: root.quality-index;
-                            options: [I18n.t("common.full"), I18n.t("previewPane.half"), I18n.t("previewPane.quarter")];
+                            options: [I18n.t("common.full"), I18n.t("previewPane.half"),
+                                I18n.t("previewPane.quarter")];
                             details: ["1:1", "1:2", "1:4"];
                             changed(index) => { root.quality-changed(index); }
                         }
