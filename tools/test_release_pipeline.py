@@ -36,7 +36,7 @@ class TestReleasePipeline(unittest.TestCase):
         try:
             res = subprocess.run(
                 ["python", str(ROOT / "scripts" / "models.py"), "release-manifest",
-                 "--version", "2.0.13", "--tag", "v2.0.13", "--out", str(out_file)],
+                 "--version", "2.0.14", "--tag", "v2.0.14", "--out", str(out_file)],
                 capture_output=True,
                 text=True,
                 cwd=str(ROOT),
@@ -47,8 +47,8 @@ class TestReleasePipeline(unittest.TestCase):
             with open(out_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            self.assertEqual(data["version"], "2.0.13")
-            self.assertEqual(data["tag"], "v2.0.13")
+            self.assertEqual(data["version"], "2.0.14")
+            self.assertEqual(data["tag"], "v2.0.14")
             self.assertEqual(data["product"], "Concat")
             self.assertIn("binaries", data)
             self.assertIn("windows", data["binaries"])
@@ -56,11 +56,11 @@ class TestReleasePipeline(unittest.TestCase):
 
             win_setup = data["binaries"]["windows"]["x86_64"]["setup"]
             self.assertEqual(
-                win_setup["file"], "Concat-2.0.13-windows-x86_64-setup.exe"
+                win_setup["file"], "Concat-2.0.14-windows-x86_64-setup.exe"
             )
             expected_url = (
                 "https://github.com/vandiy064-byte/concat-pro/releases/download/"
-                "v2.0.13/Concat-2.0.13-windows-x86_64-setup.exe"
+                "v2.0.14/Concat-2.0.14-windows-x86_64-setup.exe"
             )
             self.assertEqual(win_setup["url"], expected_url)
 
@@ -70,7 +70,8 @@ class TestReleasePipeline(unittest.TestCase):
 
     def test_cargo_toml_version(self):
         cargo_toml = (ROOT / "src" / "Cargo.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "2.0.13"', cargo_toml, "Cargo.toml version should be 2.0.13")
+        self.assertIn('version = "2.0.14"', cargo_toml, "Cargo.toml version should be 2.0.14")
+
 
 if __name__ == "__main__":
     unittest.main()

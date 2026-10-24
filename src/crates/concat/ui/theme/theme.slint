@@ -135,19 +135,20 @@ export global Theme {
     // ── shape ────────────────────────────────────────────────────────────
     //
     // radii
-    out property <length> r-xs: 3px;
-    out property <length> r-sm: 5px;
-    out property <length> r: 7px;
-    out property <length> r-lg: 12px;
+    out property <length> r-xs: 4px;
+    out property <length> r-sm: 6px;
+    out property <length> r: 10px;
+    out property <length> r-lg: 14px;
     /// The dialog sheet, and nothing smaller. A modal is the largest rounded
     /// thing in the window and wants a corner to match.
-    out property <length> r-xl: 16px;
+    out property <length> r-xl: 20px;
 
     // metrics
-    out property <length> h: 28px;        // standard control height
+    out property <length> h: 30px;        // standard control height
     out property <length> gap: 6px;
-    out property <length> pad: 14px;      // panel horizontal padding
-    out property <length> label-w: 62px;
+    out property <length> pad: 16px;      // panel horizontal padding
+    out property <length> label-w: 64px;
+
 
     // ── surfaces ─────────────────────────────────────────────────────────
     out property <color> panel: dark ? Dark.panel : Light.panel;
@@ -189,7 +190,9 @@ export global Theme {
     // Perceived lightness rather than the mean of the channels, so a pure
     // green gets dark ink and a pure blue gets light, as they should.
     out property <float> custom-light:
-        (0.299 * accent-custom.red + 0.587 * accent-custom.green + 0.114 * accent-custom.blue) / 255;
+        (0.299 * accent-custom.red + 0.587 * accent-custom.green
+            + 0.114 * accent-custom.blue) / 255;
+
     out property <Accent> custom-tone: {
         accent: accent-custom,
         hover: dark ? accent-custom.brighter(0.15) : accent-custom.darker(0.15),

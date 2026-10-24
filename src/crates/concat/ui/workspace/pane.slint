@@ -21,9 +21,10 @@ export component Pane inherits Rectangle {
     in property <bool> outlined: false;
 
     background: Theme.panel;
-    border-width: root.outlined ? 1px : 0px;
+    border-width: 1px;
     border-color: Theme.line;
     border-radius: Theme.r-lg;
+
     // Rounded corners only cut the pane's own fill; the body has to be clipped
     // to them as well or a full-bleed child squares them off again.
     clip: true;

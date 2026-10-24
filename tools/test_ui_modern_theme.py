@@ -10,8 +10,9 @@ class TestUiModernTheme(unittest.TestCase):
     def test_dark_palette_tokens(self):
         dark_slint = (ROOT / "src" / "crates" / "concat" / "ui" / "theme" / "dark.slint")
         content = dark_slint.read_text(encoding="utf-8")
-        self.assertIn("panel: #151824", content)
-        self.assertIn("line-strong: #8b5cf666", content)
+        self.assertIn("panel: #111420", content)
+        self.assertIn("line-strong: #8b5cf680", content)
+
         self.assertIn("playhead: #06b6d4", content)
         self.assertIn("wave: #38bdf8d9", content)
         self.assertIn("accent: #8b5cf6", content)
